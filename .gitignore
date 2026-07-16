@@ -1,0 +1,18 @@
+# Environment variables
+.env
+.env.local
+*.pem
+*.key
+
+# Dependencies
+node_modules/
+venv/
+.venv/
+__pycache__/
+
+# Build and IDE files
+.DS_Store
+.vscode/
+.idea/
+dist/
+build/
