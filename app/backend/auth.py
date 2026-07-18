@@ -1,13 +1,13 @@
 import os
 from functools import lru_cache
 from typing import Annotated, Any
-from typing_extensions import TypedDict
 
 import jwt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jwt import PyJWKClient, PyJWKClientError
 from jwt.exceptions import InvalidTokenError
+from typing_extensions import TypedDict
 
 bearer_scheme = HTTPBearer(auto_error=False)
 _asymmetric_algorithms = {"ES256", "ES384", "ES512", "RS256", "RS384", "RS512"}
