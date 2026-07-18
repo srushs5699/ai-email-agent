@@ -1,6 +1,6 @@
 import os
 from functools import lru_cache
-from typing import Annotated, Any, 
+from typing import Annotated, Any
 from typing_extensions import TypedDict
 
 import jwt
