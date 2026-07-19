@@ -99,6 +99,82 @@ class SupabaseAdmin:
             return None
         return rows[0] if isinstance(rows[0], dict) else None
 
+    def create_draft(
+        self, outreach_item: dict[str, Any], draft: dict[str, Any]
+    ) -> dict[str, Any]:
+        outreach_response = httpx.post(
+            f"{self._project_url}/rest/v1/outreach_items",
+            json=outreach_item,
+            headers={**self._headers, "Prefer": "return=representation"},
+            timeout=30.0,
+        )
+        outreach_response.raise_for_status()
+        outreach_rows = outreach_response.json()
+        if (
+            not isinstance(outreach_rows, list)
+            or not outreach_rows
+            or not isinstance(outreach_rows[0], dict)
+        ):
+            raise ValueError("Supabase did not return the outreach item.")
+        draft["outreach_item_id"] = outreach_rows[0]["id"]
+        draft_response = httpx.post(
+            f"{self._project_url}/rest/v1/generated_drafts",
+            json=draft,
+            headers={**self._headers, "Prefer": "return=representation"},
+            timeout=30.0,
+        )
+        draft_response.raise_for_status()
+        rows = draft_response.json()
+        if not isinstance(rows, list) or not rows or not isinstance(rows[0], dict):
+            raise ValueError("Supabase did not return the draft.")
+        return {**rows[0], "outreach_item": outreach_rows[0]}
+
+    def get_draft(self, draft_id: str, user_id: str) -> dict[str, Any] | None:
+        return self._get_drafts({"id": f"eq.{draft_id}", "user_id": f"eq.{user_id}"})
+
+    def get_latest_draft(self, user_id: str) -> dict[str, Any] | None:
+        return self._get_drafts(
+            {
+                "user_id": f"eq.{user_id}",
+                "draft_status": "in.(draft,ready_for_review)",
+                "order": "updated_at.desc",
+            }
+        )
+
+    def _get_drafts(self, params: dict[str, str]) -> dict[str, Any] | None:
+        response = httpx.get(
+            f"{self._project_url}/rest/v1/generated_drafts",
+            params={
+                "select": "id,subject,body,draft_status,created_at,updated_at,"
+                "outreach_items!generated_drafts_outreach_item_same_owner_fkey(*)",
+                "limit": "1",
+                **params,
+            },
+            headers=self._headers,
+            timeout=30.0,
+        )
+        response.raise_for_status()
+        rows = response.json()
+        if not isinstance(rows, list) or not rows or not isinstance(rows[0], dict):
+            return None
+        return rows[0]
+
+    def update_draft(
+        self, draft_id: str, user_id: str, update: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        response = httpx.patch(
+            f"{self._project_url}/rest/v1/generated_drafts",
+            params={"id": f"eq.{draft_id}", "user_id": f"eq.{user_id}"},
+            json=update,
+            headers={**self._headers, "Prefer": "return=representation"},
+            timeout=30.0,
+        )
+        response.raise_for_status()
+        rows = response.json()
+        if not isinstance(rows, list) or not rows or not isinstance(rows[0], dict):
+            return None
+        return rows[0]
+
 
 def get_supabase_admin() -> SupabaseAdmin:
     project_url = os.getenv("SUPABASE_URL")

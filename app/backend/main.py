@@ -5,6 +5,7 @@ from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from auth import AuthenticatedUser, get_current_user
+from drafts import router as drafts_router
 from email_generation import router as email_generation_router
 from resumes import router as resumes_router
 
@@ -26,6 +27,7 @@ app.add_middleware(
 
 app.include_router(resumes_router)
 app.include_router(email_generation_router)
+app.include_router(drafts_router)
 
 
 @app.get("/health")

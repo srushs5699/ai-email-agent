@@ -1,4 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+
+import { createDraft, getLatestDraft, updateDraft } from '../api/drafts'
 
 import {
   generateEmail,
@@ -45,18 +47,54 @@ export function OutreachPage() {
   const [generatedEmail, setGeneratedEmail] = useState<GeneratedEmail | null>(null)
   const [isGenerating, setIsGenerating] = useState(false)
   const [errorMessage, setErrorMessage] = useState('')
+  const [activeDraftId, setActiveDraftId] = useState<string | null>(null)
+  const [saveStatus, setSaveStatus] = useState<'Saving…' | 'Saved' | 'Save failed' | null>(null)
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const saveVersion = useRef(0)
+  const savedContent = useRef<string | null>(null)
+  const latestContent = useRef('')
+  const skipRecovery = useRef(false)
+  const hasUserInput = useRef(false)
+
+  const currentContent = generatedEmail
+    ? `${generatedEmail.subject}\u0000${generatedEmail.body}`
+    : ''
 
   useEffect(() => {
-    void listResumes()
-      .then((loadedResumes) => {
+    latestContent.current = currentContent
+  }, [currentContent])
+
+  useEffect(() => {
+    void listResumes().then(async (loadedResumes) => {
         setResumes(loadedResumes)
-        setForm((currentForm) => {
-          if (currentForm.resume_id || !loadedResumes[0]) {
-            return currentForm
-          }
-          setSelectedResumeId(loadedResumes[0].id)
-          return { ...currentForm, resume_id: loadedResumes[0].id }
-        })
+        try {
+          const draft = await getLatestDraft()
+          if (skipRecovery.current || hasUserInput.current) return
+          const hasResume = Boolean(draft.resume_id) && loadedResumes.some(
+            (resume) => resume.id === draft.resume_id,
+          )
+          setForm({
+            resume_id: hasResume && draft.resume_id ? draft.resume_id : '',
+            linkedin_post_text: draft.linkedin_post_text,
+            job_description_text: draft.job_description_text,
+            no_job_description: draft.no_job_description,
+            recipient_to: draft.recipient_to,
+            recipient_cc: draft.recipient_cc ?? '',
+            recipient_name: draft.recipient_name ?? '',
+            company_name: draft.company_name ?? '',
+          })
+          if (hasResume && draft.resume_id) setSelectedResumeId(draft.resume_id)
+          setGeneratedEmail({ subject: draft.subject, body: draft.body })
+          setActiveDraftId(draft.id)
+          savedContent.current = `${draft.subject}\u0000${draft.body}`
+          setSaveStatus('Saved')
+        } catch {
+          setForm((currentForm) => {
+            if (currentForm.resume_id || !loadedResumes[0]) return currentForm
+            setSelectedResumeId(loadedResumes[0].id)
+            return { ...currentForm, resume_id: loadedResumes[0].id }
+          })
+        }
       })
       .catch(() => {
         setErrorMessage('Unable to load resumes. Return to the Resume Library and try again.')
@@ -67,6 +105,7 @@ export function OutreachPage() {
     key: Key,
     value: OutreachForm[Key],
   ): void {
+    hasUserInput.current = true
     setForm((currentForm) => ({ ...currentForm, [key]: value }))
   }
 
@@ -107,12 +146,57 @@ export function OutreachPage() {
         company_name: form.company_name.trim() || undefined,
       })
       setGeneratedEmail(email)
+      if (activeDraftId) {
+        await updateDraft(activeDraftId, { subject: email.subject, body: email.body })
+      } else {
+        const draft = await createDraft({
+          ...form,
+          recipient_to: form.recipient_to.trim(),
+          recipient_cc: form.recipient_cc.trim() || undefined,
+          recipient_name: form.recipient_name.trim() || undefined,
+          company_name: form.company_name.trim() || undefined,
+          subject: email.subject,
+          body: email.body,
+        })
+        setActiveDraftId(draft.id)
+      }
+      savedContent.current = `${email.subject}\u0000${email.body}`
+      setSaveStatus('Saved')
     } catch {
       setErrorMessage('Unable to generate an email right now. Please try again.')
     } finally {
       setIsGenerating(false)
     }
   }
+
+  function updateGeneratedEmail(key: keyof GeneratedEmail, value: string): void {
+    hasUserInput.current = true
+    setGeneratedEmail((currentEmail) =>
+      currentEmail ? { ...currentEmail, [key]: value } : null,
+    )
+  }
+
+  useEffect(() => {
+    if (!activeDraftId || !generatedEmail || currentContent === savedContent.current) return
+    if (saveTimer.current) clearTimeout(saveTimer.current)
+    const requestVersion = ++saveVersion.current
+    setSaveStatus('Saving…')
+    saveTimer.current = setTimeout(() => {
+      void updateDraft(activeDraftId, { subject: generatedEmail.subject, body: generatedEmail.body })
+        .then(() => {
+          if (requestVersion === saveVersion.current && currentContent === latestContent.current) {
+            savedContent.current = currentContent
+            setSaveStatus('Saved')
+          }
+        })
+        .catch(() => {
+          if (requestVersion === saveVersion.current) setSaveStatus('Save failed')
+        })
+    }, 800)
+    return () => {
+      if (saveTimer.current) clearTimeout(saveTimer.current)
+    }
+  }, [activeDraftId, currentContent, generatedEmail])
 
   async function copyText(text: string): Promise<void> {
     try {
@@ -123,7 +207,15 @@ export function OutreachPage() {
   }
 
   function startOver(): void {
+    skipRecovery.current = true
+    if (saveTimer.current) clearTimeout(saveTimer.current)
+    saveVersion.current += 1
+    savedContent.current = null
+    setActiveDraftId(null)
     setGeneratedEmail(null)
+    setForm(initialForm)
+    setSelectedResumeId('')
+    setSaveStatus(null)
     setErrorMessage('')
   }
 
@@ -266,9 +358,7 @@ export function OutreachPage() {
               <input
                 id="email-subject"
                 onChange={(event) =>
-                  setGeneratedEmail((currentEmail) =>
-                    currentEmail ? { ...currentEmail, subject: event.target.value } : null,
-                  )
+                  updateGeneratedEmail('subject', event.target.value)
                 }
                 value={generatedEmail.subject}
               />
@@ -278,9 +368,7 @@ export function OutreachPage() {
               <textarea
                 id="email-body"
                 onChange={(event) =>
-                  setGeneratedEmail((currentEmail) =>
-                    currentEmail ? { ...currentEmail, body: event.target.value } : null,
-                  )
+                  updateGeneratedEmail('body', event.target.value)
                 }
                 value={generatedEmail.body}
               />
@@ -299,6 +387,7 @@ export function OutreachPage() {
                 Copy Full Email
               </button>
             </div>
+            {saveStatus && <p aria-live="polite">{saveStatus}</p>}
             <div aria-label="Review email actions" className="outreach-secondary-actions">
               <button onClick={startOver} type="button">
                 Start Over
