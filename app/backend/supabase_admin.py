@@ -169,6 +169,28 @@ class SupabaseAdmin:
     def get_draft(self, draft_id: str, user_id: str) -> dict[str, Any] | None:
         return self._get_drafts({"id": f"eq.{draft_id}", "user_id": f"eq.{user_id}"})
 
+    def find_active_duplicate_draft(
+        self, user_id: str, recipient_to: str, linkedin_post_url: str | None
+    ) -> dict[str, Any] | None:
+        if not linkedin_post_url:
+            return None
+        response = httpx.get(
+            f"{self._project_url}/rest/v1/generated_drafts",
+            params={
+                "select": "id,outreach_items!inner(recipient_to,linkedin_post_url)",
+                "user_id": f"eq.{user_id}",
+                "draft_status": "in.(draft,ready_for_review,sent)",
+                "outreach_items.recipient_to": f"eq.{recipient_to}",
+                "outreach_items.linkedin_post_url": f"eq.{linkedin_post_url}",
+                "limit": "1",
+            },
+            headers=self._headers,
+            timeout=30.0,
+        )
+        response.raise_for_status()
+        rows = response.json()
+        return rows[0] if isinstance(rows, list) and rows and isinstance(rows[0], dict) else None
+
     def get_latest_draft(self, user_id: str) -> dict[str, Any] | None:
         return self._get_drafts(
             {
@@ -412,6 +434,15 @@ class SupabaseAdmin:
         record["processing_queue_items"] = sorted(
             record.get("processing_queue_items", []), key=lambda item: item["position"]
         )
+        reconciled = self.finalize_processing_queue_if_done(record["id"], user_id)
+        if reconciled is not None and reconciled.get("status") not in {
+            "draft", "running", "paused"
+        }:
+            # A legacy running batch can already contain only terminal items.
+            # Re-query so it is never returned as an active queue.
+            return self.get_active_processing_queue(user_id)
+        if reconciled is not None:
+            return reconciled
         return record
 
     def remove_processing_queue_item(
@@ -548,7 +579,8 @@ class SupabaseAdmin:
         response.raise_for_status()
 
     def fail_processing_queue_item(
-        self, item_id: str, user_id: str, error_code: str
+        self, item_id: str, user_id: str, error_code: str, failure_status: str = "failed",
+        failure_reason: str | None = None,
     ) -> None:
         httpx.patch(
             f"{self._project_url}/rest/v1/processing_queue_items",
@@ -560,6 +592,8 @@ class SupabaseAdmin:
             json={
                 "status": "failed",
                 "error_code": error_code,
+                "failure_status": failure_status,
+                "failure_reason": failure_reason or "This task could not be processed.",
                 "completed_at": datetime.now(timezone.utc).isoformat(),
                 "processing_lease_expires_at": None,
             },
@@ -567,31 +601,93 @@ class SupabaseAdmin:
             timeout=30.0,
         ).raise_for_status()
 
-    def finish_processing_queue_if_done(self, queue_id: str, user_id: str) -> None:
+    def list_failed_tasks(self, user_id: str) -> list[dict[str, Any]]:
+        response = httpx.get(
+            f"{self._project_url}/rest/v1/processing_queue_items",
+            params={"select": "*", "user_id": f"eq.{user_id}", "status": "in.(failed,processing)",
+                    "failure_status": "not.is.null", "hidden_at": "is.null", "order": "updated_at.desc"},
+            headers=self._headers, timeout=30.0,
+        )
+        response.raise_for_status()
+        rows = response.json()
+        return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+
+    def get_failed_task(self, item_id: str, user_id: str) -> dict[str, Any] | None:
+        response = httpx.get(
+            f"{self._project_url}/rest/v1/processing_queue_items",
+            params={"select": "*", "id": f"eq.{item_id}", "user_id": f"eq.{user_id}", "limit": "1"},
+            headers=self._headers, timeout=30.0,
+        )
+        response.raise_for_status()
+        rows = response.json()
+        return rows[0] if isinstance(rows, list) and rows and isinstance(rows[0], dict) else None
+
+    def claim_failed_task_retry(self, item_id: str, user_id: str) -> dict[str, Any] | None:
+        response = httpx.post(
+            f"{self._project_url}/rest/v1/rpc/claim_failed_processing_queue_item",
+            json={"p_item_id": item_id, "p_user_id": user_id}, headers=self._headers,
+            timeout=30.0,
+        )
+        response.raise_for_status()
+        rows = response.json()
+        return rows[0] if isinstance(rows, list) and rows and isinstance(rows[0], dict) else None
+
+    def hide_failed_task(self, item_id: str, user_id: str) -> bool:
+        response = httpx.patch(
+            f"{self._project_url}/rest/v1/processing_queue_items",
+            params={"id": f"eq.{item_id}", "user_id": f"eq.{user_id}", "status": "eq.failed", "hidden_at": "is.null"},
+            json={"hidden_at": datetime.now(timezone.utc).isoformat()},
+            headers={**self._headers, "Prefer": "return=representation"}, timeout=30.0,
+        )
+        response.raise_for_status()
+        return bool(response.json())
+
+    def finalize_processing_queue_if_done(
+        self, queue_id: str, user_id: str
+    ) -> dict[str, Any] | None:
+        """Idempotently move an active batch to a terminal state when all items end."""
         queue = self._queue(queue_id, user_id)
-        if queue is None or queue.get("status") != "running":
-            return
+        if queue is None:
+            return None
         items = queue.get("processing_queue_items", [])
-        pending = any(item.get("status") in {"pending", "processing"} for item in items)
-        if not pending:
-            failed = sum(item.get("status") == "failed" for item in items)
-            completed = sum(item.get("status") == "completed" for item in items)
-            httpx.patch(
-                f"{self._project_url}/rest/v1/processing_queues",
-                params={
-                    "id": f"eq.{queue_id}",
-                    "user_id": f"eq.{user_id}",
-                    "status": "eq.running",
-                },
-                json={
-                    "status": "completed_with_failures" if failed else "completed",
-                    "completed_items": completed,
-                    "failed_items": failed,
-                    "completed_at": datetime.now(timezone.utc).isoformat(),
-                },
-                headers=self._headers,
-                timeout=30.0,
-            ).raise_for_status()
+        if not items or any(
+            item.get("status") in {"pending", "processing"} for item in items
+        ):
+            return queue
+        if queue.get("status") not in {"draft", "running", "paused"}:
+            return queue
+        failed = sum(item.get("status") == "failed" for item in items)
+        completed = sum(item.get("status") == "completed" for item in items)
+        response = httpx.patch(
+            f"{self._project_url}/rest/v1/processing_queues",
+            params={
+                "id": f"eq.{queue_id}",
+                "user_id": f"eq.{user_id}",
+                "status": "in.(draft,running,paused)",
+            },
+            json={
+                "status": "completed_with_failures" if failed else "completed",
+                "completed_items": completed,
+                "failed_items": failed,
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+            },
+            headers={**self._headers, "Prefer": "return=representation"},
+            timeout=30.0,
+        )
+        response.raise_for_status()
+        rows = response.json()
+        if isinstance(rows, list) and rows and isinstance(rows[0], dict):
+            return self._queue(queue_id, user_id) or rows[0]
+        # A concurrent worker finalized the batch first; its terminal state is
+        # authoritative and no second transition is attempted.
+        return self._queue(queue_id, user_id)
+
+    def finish_processing_queue_if_done(self, queue_id: str, user_id: str) -> None:
+        self.finalize_processing_queue_if_done(queue_id, user_id)
+
+    def reconcile_processing_queue(self, queue_id: str, user_id: str) -> None:
+        """Refresh terminal counters after a one-item retry without restarting a batch."""
+        self.finalize_processing_queue_if_done(queue_id, user_id)
 
     def get_gmail_connection(self, user_id: str) -> GmailConnectionRecord | None:
         try:

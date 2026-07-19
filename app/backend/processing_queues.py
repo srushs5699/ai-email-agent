@@ -9,7 +9,7 @@ from uuid import UUID
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from auth import AuthenticatedUser, get_current_user
 from drafts import DraftCreateRequest
@@ -27,6 +27,10 @@ logger = logging.getLogger(__name__)
 CurrentUser = Annotated[AuthenticatedUser, Depends(get_current_user)]
 Storage = Annotated[SupabaseAdmin, Depends(get_supabase_admin)]
 Generator = Annotated[EmailGenerator, Depends(get_email_generator)]
+
+
+class DuplicateQueueItemError(Exception):
+    """An exact recipient and LinkedIn-source match already has a draft."""
 
 
 class QueueInput(EmailGenerationRequest):
@@ -75,6 +79,18 @@ def _safe_error(error: Exception) -> str:
         if isinstance(error, ProviderUnavailableError)
         else "generation_failed"
     )
+
+
+def _failure_details(error: Exception) -> tuple[str, str, str]:
+    if isinstance(error, DuplicateQueueItemError):
+        return ("duplicate", "duplicate", "A draft already exists for this recipient and LinkedIn source.")
+    if isinstance(error, ValidationError) and "recipient_to" in str(error):
+        return ("no_email_available", "no_email_available", "No usable recipient email is available.")
+    if isinstance(error, ProviderUnavailableError):
+        return ("failed", "generation_unavailable", "Email generation is temporarily unavailable. Try again.")
+    if isinstance(error, ValueError) and str(error) == "resume":
+        return ("failed", "resume_unavailable", "The selected resume is unavailable or not ready.")
+    return ("failed", _safe_error(error), "This task could not be processed. Try again.")
 
 
 @router.post("", response_model=QueueResponse, status_code=status.HTTP_201_CREATED)
@@ -176,28 +192,41 @@ def process_queue(
 ) -> None:
     """Claim, generate and persist exactly one row at a time until paused/done."""
     storage.recover_stale_processing_queue_items(queue_id, user_id)
+    storage.finalize_processing_queue_if_done(queue_id, user_id)
     while True:
         item = storage.claim_next_processing_queue_item(queue_id, user_id)
         if item is None:
             break
-        try:
-            payload = QueueInput.model_validate(item["input_payload"])
-            resume = storage.get_resume(str(payload.resume_id), user_id)
-            if (
-                resume is None
-                or resume.get("parse_status") != "completed"
-                or not isinstance(resume.get("extracted_text"), str)
-            ):
-                raise ValueError("resume")
-            generated = generator.generate(
-                build_generation_prompt(resume["extracted_text"], payload)
-            )
-            draft_request = DraftCreateRequest(
-                **payload.model_dump(), subject=generated.subject, body=generated.body
-            )
-            outreach = {
+        process_queue_item(item, user_id, storage, generator)
+        storage.finish_processing_queue_if_done(queue_id, user_id)
+    storage.finish_processing_queue_if_done(queue_id, user_id)
+
+
+def process_queue_item(
+    item: dict[str, Any], user_id: str, storage: SupabaseAdmin, generator: EmailGenerator
+) -> None:
+    """Process a claimed queue item; shared by normal processing and one-task retry."""
+    try:
+        payload = QueueInput.model_validate(item["input_payload"])
+        resume = storage.get_resume(str(payload.resume_id), user_id)
+        if (
+            resume is None
+            or resume.get("parse_status") != "completed"
+            or not isinstance(resume.get("extracted_text"), str)
+        ):
+            raise ValueError("resume")
+        if storage.find_active_duplicate_draft(
+            user_id, payload.recipient_to, payload.linkedin_post_url
+        ):
+            raise DuplicateQueueItemError()
+        generated = generator.generate(build_generation_prompt(resume["extracted_text"], payload))
+        draft_request = DraftCreateRequest(
+            **payload.model_dump(), subject=generated.subject, body=generated.body
+        )
+        outreach = {
                 "user_id": user_id,
                 "linkedin_post_text": draft_request.linkedin_post_text,
+                "linkedin_post_url": draft_request.linkedin_post_url,
                 "job_description_text": draft_request.job_description_text or None,
                 "no_job_description": draft_request.no_job_description,
                 "recipient_to": draft_request.recipient_to,
@@ -206,22 +235,17 @@ def process_queue(
                 "company_name": draft_request.company_name,
                 "selected_resume_id": str(draft_request.resume_id),
                 "status": "ready",
-            }
-            draft = {
+        }
+        draft = {
                 "user_id": user_id,
                 "subject": generated.subject,
                 "body": generated.body,
                 "generation_status": "completed",
                 "draft_status": "ready_for_review",
-            }
-            saved = storage.create_draft(outreach, draft)
-            storage.complete_processing_queue_item(item["id"], user_id, saved["id"])
-        except Exception as error:
-            logger.warning(
-                "processing queue item failed queue_id=%s item_id=%s code=%s",
-                queue_id,
-                item.get("id"),
-                _safe_error(error),
-            )
-            storage.fail_processing_queue_item(item["id"], user_id, _safe_error(error))
-        storage.finish_processing_queue_if_done(queue_id, user_id)
+        }
+        saved = storage.create_draft(outreach, draft)
+        storage.complete_processing_queue_item(item["id"], user_id, saved["id"])
+    except Exception as error:
+        failure_status, error_code, reason = _failure_details(error)
+        logger.warning("processing queue item failed item_id=%s code=%s", item.get("id"), error_code)
+        storage.fail_processing_queue_item(item["id"], user_id, error_code, failure_status, reason)

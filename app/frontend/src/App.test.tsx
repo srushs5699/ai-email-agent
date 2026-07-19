@@ -190,7 +190,7 @@ describe('App', () => {
     expect(screen.getByRole('link', { name: 'Manage resumes' })).toHaveAttribute('href', '/resumes')
     expect(screen.getByRole('link', { name: 'Create outreach' })).toHaveAttribute('href', '/outreach')
     expect(screen.getByRole('link', { name: 'Home' })).toHaveAttribute('aria-current', 'page')
-    expect(screen.getAllByRole('article')).toHaveLength(4)
+    expect(screen.getAllByRole('article')).toHaveLength(5)
   })
 
   it('renders a reusable back control on an authenticated subpage', async () => {

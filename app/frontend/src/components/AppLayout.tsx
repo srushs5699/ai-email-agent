@@ -9,6 +9,7 @@ const links = [
   { label: 'Compose', to: '/outreach' },
   { label: 'Processing', to: '/processing-queue' },
   { label: 'Review', to: '/review-queue' },
+  { label: 'Failed tasks', to: '/failed-tasks' },
 ]
 
 export function AppLayout({ children }: { children: React.ReactNode }) {

@@ -34,6 +34,7 @@ Storage = Annotated[SupabaseAdmin, Depends(get_supabase_admin)]
 
 class DraftCreateRequest(BaseModel):
     resume_id: UUID
+    linkedin_post_url: str | None = None
     linkedin_post_text: str = ""
     job_description_text: str = ""
     no_job_description: bool = False
@@ -249,7 +250,8 @@ def create_draft(
         )
     outreach = {
         "user_id": user["user_id"],
-        "linkedin_post_text": request.linkedin_post_text,
+            "linkedin_post_text": request.linkedin_post_text,
+            "linkedin_post_url": request.linkedin_post_url,
         "job_description_text": request.job_description_text or None,
         "no_job_description": request.no_job_description,
         "recipient_to": request.recipient_to,

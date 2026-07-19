@@ -12,6 +12,7 @@ import { OutreachPage } from './pages/OutreachPage'
 import { ResumeLibraryPage } from './pages/ResumeLibraryPage'
 import { ProcessingQueuePage } from './pages/ProcessingQueuePage'
 import { ReviewQueuePage } from './pages/ReviewQueuePage'
+import { FailedTasksQueuePage } from './pages/FailedTasksQueuePage'
 
 function AuthenticationLoading() {
   return <main className="login-page" aria-live="polite"><p>Checking authentication...</p></main>
@@ -71,6 +72,7 @@ function DashboardPage() {
         <article className="quick-card"><p className="card-eyebrow">Create</p><h2>Compose Outreach</h2><p className="card-description">Create a personalized email and prepare it for review.</p><Link className="button button--primary card-action" to="/outreach">Create outreach <span aria-hidden="true">→</span></Link></article>
         <article className="quick-card"><p className="card-eyebrow">Batch work</p><h2>Processing Queue</h2><p className="card-description">Build and monitor batches of outreach requests.</p><Link className="button button--secondary card-action" to="/processing-queue">View processing queue <span aria-hidden="true">→</span></Link></article>
         <article className="quick-card"><p className="card-eyebrow">Approval</p><h2>Review Queue</h2><p className="card-description">Review generated drafts before explicitly sending them.</p><Link className="button button--secondary card-action" to="/review-queue">Review drafts <span aria-hidden="true">→</span></Link></article>
+        <article className="quick-card"><p className="card-eyebrow">Attention</p><h2>Failed Tasks</h2><p className="card-description">Review and retry processing items that need attention.</p><Link className="button button--secondary card-action" to="/failed-tasks">View failed tasks <span aria-hidden="true">→</span></Link></article>
       </section>
       <section className="account-card" aria-labelledby="account-heading">
         <h2 id="account-heading">Account</h2>
@@ -118,6 +120,7 @@ function App() {
           />
           <Route path="/processing-queue" element={<ProtectedRoute><ProcessingQueuePage /></ProtectedRoute>} />
           <Route path="/review-queue" element={<ProtectedRoute><ReviewQueuePage /></ProtectedRoute>} />
+          <Route path="/failed-tasks" element={<ProtectedRoute><FailedTasksQueuePage /></ProtectedRoute>} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </AuthProvider>

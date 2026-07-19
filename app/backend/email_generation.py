@@ -60,6 +60,7 @@ LinkedIn: https://www.linkedin.com/in/srushtisanjayshinde/"""
 
 class EmailGenerationRequest(BaseModel):
     resume_id: UUID
+    linkedin_post_url: str | None = None
     linkedin_post_text: str = ""
     job_description_text: str = ""
     no_job_description: bool = False

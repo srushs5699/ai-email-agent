@@ -14,7 +14,7 @@ import './ProcessingQueuePage.css'
 
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 const blank = (): EmailGenerationInput => ({
-  resume_id: '', linkedin_post_text: '', job_description_text: '',
+  resume_id: '', linkedin_post_url: '', linkedin_post_text: '', job_description_text: '',
   no_job_description: false, recipient_to: '', recipient_cc: '',
   recipient_name: '', company_name: '',
 })
@@ -47,13 +47,16 @@ export function ProcessingQueuePage() {
 
   useEffect(() => {
     void listResumes().then(setResumes)
-    void getActiveProcessingQueue().then(setQueue).catch(() => undefined)
+    void getActiveProcessingQueue().then(setQueue).catch(() => setQueue(null))
   }, [])
 
   useEffect(() => {
     if (queue?.status !== 'running') return
     const timer = window.setInterval(() => {
-      void getActiveProcessingQueue().then(setQueue).catch(() => undefined)
+      void getActiveProcessingQueue().then(setQueue).catch(() => {
+        setQueue(null)
+        setMessage('Previous queue completed. Create a new queue below.')
+      })
     }, 1000)
     return () => window.clearInterval(timer)
   }, [queue?.status])
@@ -92,7 +95,7 @@ export function ProcessingQueuePage() {
     }
   }
 
-  if (queue) {
+  if (queue && ['draft', 'running', 'paused'].includes(queue.status)) {
     return <main className="processing-queue-page">
       <div className="processing-queue-container">
         <header className="processing-queue-header"><h1>Processing Queue</h1><p>Add up to 10 outreach items. Nothing will process until you create the queue and click Start Queue.</p></header>
@@ -113,11 +116,18 @@ export function ProcessingQueuePage() {
     </main>
   }
 
+  if (queue) {
+    return <main className="processing-queue-page"><div className="processing-queue-container">
+      <header className="processing-queue-header"><h1>Processing Queue</h1><p>The previous queue has finished.</p></header>
+      <section className="queue-status-panel" aria-live="polite"><p>Queue status: <strong>{titleCase(queue.status)}</strong></p><p>{queue.completed_items} completed · {queue.failed_items} failed</p><button className="queue-button queue-button--primary" type="button" onClick={() => { setQueue(null); setMessage('Create a new queue below.') }}>Create New Queue</button></section>
+    </div></main>
+  }
+
   const reachedMaximum = items.length === 10
   const canCreate = items.every(isValid) && !busy
   return <main className="processing-queue-page">
     <div className="processing-queue-container">
-      <header className="processing-queue-header"><h1>Processing Queue</h1><p>Add up to 10 outreach items. Nothing will process until you create the queue and click Start Queue.</p></header>
+      <header className="processing-queue-header"><h1>Create New Queue</h1><p>Add up to 10 outreach items. Nothing will process until you create the queue and click Start Queue.</p></header>
       <div className="queue-builder">
         {items.map((item, index) => {
           const errors = {
@@ -130,6 +140,7 @@ export function ProcessingQueuePage() {
             <div className="queue-item-card__grid">
               <div className="queue-field"><label htmlFor={`resume-${index}`}>Resume <span aria-hidden="true">*</span></label><select id={`resume-${index}`} value={item.resume_id} aria-invalid={Boolean(errors.resume)} aria-describedby={errors.resume ? `resume-error-${index}` : undefined} onBlur={() => setSubmitted(true)} onChange={(event) => update(index, 'resume_id', event.target.value)}><option value="">Select resume</option>{resumes.map((resume) => <option key={resume.id} value={resume.id}>{resume.name}</option>)}</select>{errors.resume && <p id={`resume-error-${index}`} className="queue-field-error">{errors.resume}</p>}</div>
               <div className="queue-field"><label htmlFor={`recipient-${index}`}>Recipient email <span aria-hidden="true">*</span></label><input id={`recipient-${index}`} type="email" value={item.recipient_to} aria-invalid={Boolean(errors.recipient)} aria-describedby={errors.recipient ? `recipient-error-${index}` : undefined} onBlur={() => setSubmitted(true)} onChange={(event) => update(index, 'recipient_to', event.target.value)} />{errors.recipient && <p id={`recipient-error-${index}`} className="queue-field-error">{errors.recipient}</p>}</div>
+              <div className="queue-field"><label htmlFor={`linkedin-url-${index}`}>LinkedIn post URL (optional)</label><input id={`linkedin-url-${index}`} type="url" value={item.linkedin_post_url ?? ''} onChange={(event) => update(index, 'linkedin_post_url', event.target.value)} /></div>
               <div className="queue-field queue-field--full"><label htmlFor={`linkedin-${index}`}>LinkedIn post text <span aria-hidden="true">*</span></label><textarea id={`linkedin-${index}`} value={item.linkedin_post_text} aria-invalid={Boolean(errors.linkedin)} aria-describedby={errors.linkedin ? `linkedin-error-${index}` : undefined} onBlur={() => setSubmitted(true)} onChange={(event) => update(index, 'linkedin_post_text', event.target.value)} />{errors.linkedin && <p id={`linkedin-error-${index}`} className="queue-field-error">{errors.linkedin}</p>}</div>
               <div className="queue-field queue-field--full"><label htmlFor={`job-description-${index}`}>Job description <span className="queue-optional">Optional</span></label><textarea id={`job-description-${index}`} value={item.job_description_text} onChange={(event) => update(index, 'job_description_text', event.target.value)} /></div>
             </div>

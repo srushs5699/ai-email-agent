@@ -72,4 +72,26 @@ describe('ProcessingQueuePage', () => {
     expect(screen.getByRole('button', { name: 'Start Queue' })).toBeInTheDocument()
     expect(mocks.start).not.toHaveBeenCalled()
   })
+
+  it('shows pause only for a running active queue', async () => {
+    mocks.active.mockResolvedValue({ id: 'queue-1', status: 'running', total_items: 1, completed_items: 0, failed_items: 0, created_at: '', updated_at: '', items: [] })
+    render(<ProcessingQueuePage />)
+    expect(await screen.findByRole('button', { name: 'Pause Queue' })).toBeInTheDocument()
+  })
+
+  it('shows resume only for a paused active queue', async () => {
+    mocks.active.mockResolvedValue({ id: 'queue-1', status: 'paused', total_items: 1, completed_items: 0, failed_items: 0, created_at: '', updated_at: '', items: [] })
+    render(<ProcessingQueuePage />)
+    expect(await screen.findByRole('button', { name: 'Resume Queue' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Pause Queue' })).not.toBeInTheDocument()
+  })
+
+  it('offers a new queue after a completed batch', async () => {
+    mocks.active.mockResolvedValue({ id: 'queue-1', status: 'completed', total_items: 1, completed_items: 1, failed_items: 0, created_at: '', updated_at: '', items: [{ id: 'item-1', position: 0, status: 'completed' }] })
+    render(<ProcessingQueuePage />)
+    expect(await screen.findByText('Completed')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Pause Queue' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Create New Queue' }))
+    expect(await screen.findByRole('button', { name: 'Create Queue' })).toBeInTheDocument()
+  })
 })
