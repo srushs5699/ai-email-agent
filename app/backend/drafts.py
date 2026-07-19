@@ -8,6 +8,8 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, field_validator
 
 from auth import AuthenticatedUser, get_current_user
+from gmail import get_gmail_oauth_service
+from gmail_drafts import GmailDraftError, GmailDraftResult, GmailDraftService
 from supabase_admin import SupabaseAdmin, get_supabase_admin
 
 router = APIRouter(prefix="/api/v1/drafts", tags=["drafts"])
@@ -53,6 +55,8 @@ class DraftCreateRequest(BaseModel):
 class DraftUpdateRequest(BaseModel):
     subject: str
     body: str
+    recipient_to: str | None = None
+    recipient_cc: str | None = None
 
     @field_validator("subject", "body")
     @classmethod
@@ -60,6 +64,26 @@ class DraftUpdateRequest(BaseModel):
         if not value.strip():
             raise ValueError("Draft content must not be blank.")
         return value
+
+    @field_validator("recipient_to")
+    @classmethod
+    def valid_optional_to(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not EMAIL_PATTERN.fullmatch(value):
+            raise ValueError("Enter a valid email address.")
+        return value
+
+    @field_validator("recipient_cc")
+    @classmethod
+    def valid_optional_cc(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if value and not EMAIL_PATTERN.fullmatch(value):
+            raise ValueError("Enter a valid email address.")
+        return value or None
 
 
 class DraftResponse(BaseModel):
@@ -77,6 +101,24 @@ class DraftResponse(BaseModel):
     status: str
     created_at: str
     updated_at: str
+    gmail_draft_id: str | None = None
+    gmail_message_id: str | None = None
+    gmail_sync_status: str = "not_created"
+    gmail_sync_error_code: str | None = None
+
+
+class GmailDraftResponse(BaseModel):
+    gmail_draft_id: str
+    gmail_message_id: str | None
+    sync_status: str
+    created: bool
+
+
+def get_gmail_draft_service(storage: Storage) -> GmailDraftService:
+    return GmailDraftService(storage, get_gmail_oauth_service(storage))
+
+
+GmailService = Annotated[GmailDraftService, Depends(get_gmail_draft_service)]
 
 
 def _response(record: dict[str, Any]) -> DraftResponse:
@@ -99,6 +141,10 @@ def _response(record: dict[str, Any]) -> DraftResponse:
             "status": record["draft_status"],
             "created_at": record["created_at"],
             "updated_at": record["updated_at"],
+            "gmail_draft_id": record.get("gmail_draft_id"),
+            "gmail_message_id": record.get("gmail_message_id"),
+            "gmail_sync_status": record.get("gmail_sync_status") or "not_created",
+            "gmail_sync_error_code": record.get("gmail_sync_error_code"),
         }
     )
 
@@ -222,8 +268,66 @@ def update_draft(
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Draft not found."
             )
-        return _response({**record, "outreach_items": existing.get("outreach_items")})
+        outreach = existing.get("outreach_items")
+        if not isinstance(outreach, dict):
+            raise ValueError("Supabase returned an invalid draft.")
+        recipient_update = {
+            key: value
+            for key, value in {
+                "recipient_to": request.recipient_to,
+                "recipient_cc": request.recipient_cc,
+            }.items()
+            if value is not None
+        }
+        if recipient_update:
+            updated_outreach = storage.update_draft_recipients(
+                str(outreach["id"]), user["user_id"], recipient_update
+            )
+            if updated_outreach is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND, detail="Draft not found."
+                )
+            outreach = updated_outreach
+        return _response({**record, "outreach_items": outreach})
     except HTTPException:
         raise
     except (httpx.HTTPError, ValueError) as error:
         raise _persistence_error(error) from error
+
+
+@router.post("/{draft_id}/gmail", response_model=GmailDraftResponse)
+async def create_gmail_draft(
+    draft_id: UUID, user: CurrentUser, service: GmailService
+) -> GmailDraftResponse:
+    try:
+        result: GmailDraftResult = await service.create_gmail_draft(
+            user["user_id"], str(draft_id)
+        )
+    except GmailDraftError as error:
+        raise HTTPException(status_code=error.status_code, detail=error.code) from None
+    if result.gmail_draft_id is None:
+        raise HTTPException(status_code=502, detail="gmail_draft_creation_failed")
+    return GmailDraftResponse(
+        gmail_draft_id=result.gmail_draft_id,
+        gmail_message_id=result.gmail_message_id,
+        sync_status=result.sync_status,
+        created=result.created,
+    )
+
+
+@router.post("/{draft_id}/gmail/sync", response_model=GmailDraftResponse)
+async def sync_gmail_draft(
+    draft_id: UUID, user: CurrentUser, service: GmailService
+) -> GmailDraftResponse:
+    try:
+        result = await service.update_gmail_draft(user["user_id"], str(draft_id))
+    except GmailDraftError as error:
+        raise HTTPException(status_code=error.status_code, detail=error.code) from None
+    if result.gmail_draft_id is None:
+        raise HTTPException(status_code=502, detail="gmail_sync_failed")
+    return GmailDraftResponse(
+        gmail_draft_id=result.gmail_draft_id,
+        gmail_message_id=result.gmail_message_id,
+        sync_status=result.sync_status,
+        created=False,
+    )
