@@ -1,5 +1,5 @@
 import logging
-import re
+from datetime import datetime, timezone
 from typing import Annotated, Any
 from uuid import UUID
 
@@ -8,15 +8,20 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, field_validator
 
 from auth import AuthenticatedUser, get_current_user
+from email_validation import (
+    RecipientValidationError,
+    approval_content_hash,
+    normalize_recipients,
+)
 from gmail import get_gmail_oauth_service
 from gmail_drafts import GmailDraftError, GmailDraftResult, GmailDraftService
+from gmail_sending import GmailSendResult, GmailSendService
 from supabase_admin import SupabaseAdmin, get_supabase_admin
 
 router = APIRouter(prefix="/api/v1/drafts", tags=["drafts"])
 logger = logging.getLogger(__name__)
 CurrentUser = Annotated[AuthenticatedUser, Depends(get_current_user)]
 Storage = Annotated[SupabaseAdmin, Depends(get_supabase_admin)]
-EMAIL_PATTERN = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
 
 class DraftCreateRequest(BaseModel):
@@ -34,12 +39,20 @@ class DraftCreateRequest(BaseModel):
     @field_validator("recipient_to")
     @classmethod
     def valid_to(cls, value: str) -> str:
-        value = value.strip()
-        if not EMAIL_PATTERN.fullmatch(value):
-            raise ValueError("Enter a valid email address.")
-        return value
+        try:
+            return normalize_recipients(value, required=True) or ""
+        except RecipientValidationError as error:
+            raise ValueError(str(error)) from error
 
-    @field_validator("recipient_cc", "recipient_name", "company_name")
+    @field_validator("recipient_cc")
+    @classmethod
+    def valid_cc(cls, value: str | None) -> str | None:
+        try:
+            return normalize_recipients(value, required=False)
+        except RecipientValidationError as error:
+            raise ValueError(str(error)) from error
+
+    @field_validator("recipient_name", "company_name")
     @classmethod
     def strip_optional(cls, value: str | None) -> str | None:
         return value.strip() if value and value.strip() else None
@@ -57,6 +70,7 @@ class DraftUpdateRequest(BaseModel):
     body: str
     recipient_to: str | None = None
     recipient_cc: str | None = None
+    resume_id: UUID | None = None
 
     @field_validator("subject", "body")
     @classmethod
@@ -70,20 +84,20 @@ class DraftUpdateRequest(BaseModel):
     def valid_optional_to(cls, value: str | None) -> str | None:
         if value is None:
             return None
-        value = value.strip()
-        if not EMAIL_PATTERN.fullmatch(value):
-            raise ValueError("Enter a valid email address.")
-        return value
+        try:
+            return normalize_recipients(value, required=True)
+        except RecipientValidationError as error:
+            raise ValueError(str(error)) from error
 
     @field_validator("recipient_cc")
     @classmethod
     def valid_optional_cc(cls, value: str | None) -> str | None:
         if value is None:
             return None
-        value = value.strip()
-        if value and not EMAIL_PATTERN.fullmatch(value):
-            raise ValueError("Enter a valid email address.")
-        return value or None
+        try:
+            return normalize_recipients(value, required=False)
+        except RecipientValidationError as error:
+            raise ValueError(str(error)) from error
 
 
 class DraftResponse(BaseModel):
@@ -105,6 +119,12 @@ class DraftResponse(BaseModel):
     gmail_message_id: str | None = None
     gmail_sync_status: str = "not_created"
     gmail_sync_error_code: str | None = None
+    approval_status: str = "pending"
+    approved_at: str | None = None
+    send_status: str = "not_sent"
+    sent_at: str | None = None
+    gmail_sent_message_id: str | None = None
+    send_error_code: str | None = None
 
 
 class GmailDraftResponse(BaseModel):
@@ -119,6 +139,24 @@ def get_gmail_draft_service(storage: Storage) -> GmailDraftService:
 
 
 GmailService = Annotated[GmailDraftService, Depends(get_gmail_draft_service)]
+
+
+def get_gmail_send_service(storage: Storage) -> GmailSendService:
+    return GmailSendService(storage, get_gmail_oauth_service(storage))
+
+
+GmailSend = Annotated[GmailSendService, Depends(get_gmail_send_service)]
+
+
+class ApprovalResponse(BaseModel):
+    approval_status: str
+    approved_at: str
+
+
+class SendResponse(BaseModel):
+    send_status: str
+    sent_at: str
+    gmail_sent_message_id: str
 
 
 def _response(record: dict[str, Any]) -> DraftResponse:
@@ -145,6 +183,12 @@ def _response(record: dict[str, Any]) -> DraftResponse:
             "gmail_message_id": record.get("gmail_message_id"),
             "gmail_sync_status": record.get("gmail_sync_status") or "not_created",
             "gmail_sync_error_code": record.get("gmail_sync_error_code"),
+            "approval_status": record.get("approval_status") or "pending",
+            "approved_at": record.get("approved_at"),
+            "send_status": record.get("send_status") or "not_sent",
+            "sent_at": record.get("sent_at"),
+            "gmail_sent_message_id": record.get("gmail_sent_message_id"),
+            "send_error_code": record.get("send_error_code"),
         }
     )
 
@@ -255,6 +299,8 @@ def update_draft(
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Draft not found."
             )
+        if existing.get("send_status") == "sent":
+            raise HTTPException(status_code=409, detail="draft_already_sent")
         record = storage.update_draft(
             str(draft_id),
             user["user_id"],
@@ -262,6 +308,9 @@ def update_draft(
                 "subject": request.subject,
                 "body": request.body,
                 "draft_status": "ready_for_review",
+                "approval_status": "pending",
+                "approved_at": None,
+                "approved_content_hash": None,
             },
         )
         if record is None:
@@ -288,7 +337,107 @@ def update_draft(
                     status_code=status.HTTP_404_NOT_FOUND, detail="Draft not found."
                 )
             outreach = updated_outreach
+        resume_changed = request.resume_id is not None and str(
+            request.resume_id
+        ) != outreach.get("selected_resume_id")
+        if resume_changed:
+            if storage.get_resume(str(request.resume_id), user["user_id"]) is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND, detail="Resume not found."
+                )
+            updated_outreach = storage.update_draft_recipients(
+                str(outreach["id"]),
+                user["user_id"],
+                {"selected_resume_id": str(request.resume_id)},
+            )
+            if updated_outreach is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND, detail="Draft not found."
+                )
+            outreach = updated_outreach
         return _response({**record, "outreach_items": outreach})
+    except HTTPException:
+        raise
+    except (httpx.HTTPError, ValueError) as error:
+        raise _persistence_error(error) from error
+
+
+@router.post("/{draft_id}/approve", response_model=ApprovalResponse)
+def approve_draft(
+    draft_id: UUID, user: CurrentUser, storage: Storage
+) -> ApprovalResponse:
+    try:
+        record = storage.get_draft_for_gmail(str(draft_id), user["user_id"])
+        if record is None:
+            raise HTTPException(status_code=404, detail="Draft not found.")
+        if record.get("send_status") == "sent":
+            raise HTTPException(status_code=409, detail="draft_already_sent")
+        connection = storage.get_gmail_connection(user["user_id"])
+        if connection is None or connection.revoked_at is not None:
+            raise HTTPException(status_code=409, detail="gmail_authorization_required")
+        if not record.get("gmail_draft_id"):
+            raise HTTPException(status_code=409, detail="gmail_draft_not_created")
+        if record.get("gmail_sync_status") != "synced":
+            raise HTTPException(status_code=409, detail="gmail_sync_not_ready")
+        content_hash = approval_content_hash(record)
+        updated = storage.update_draft(
+            str(draft_id),
+            user["user_id"],
+            {
+                "approval_status": "approved",
+                "approved_at": datetime.now(timezone.utc).isoformat(),
+                "approved_content_hash": content_hash,
+            },
+        )
+        if updated is None:
+            raise HTTPException(status_code=404, detail="Draft not found.")
+        approved_at = updated.get("approved_at")
+        return ApprovalResponse(
+            approval_status="approved",
+            approved_at=approved_at if isinstance(approved_at, str) else "",
+        )
+    except RecipientValidationError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from None
+    except HTTPException:
+        raise
+    except (httpx.HTTPError, ValueError) as error:
+        raise _persistence_error(error) from error
+
+
+@router.post("/{draft_id}/send", response_model=SendResponse)
+async def send_draft(
+    draft_id: UUID, user: CurrentUser, storage: Storage, service: GmailSend
+) -> SendResponse:
+    try:
+        record = storage.get_draft_for_gmail(str(draft_id), user["user_id"])
+        if record is None:
+            raise HTTPException(status_code=404, detail="Draft not found.")
+        if record.get("send_status") == "sent":
+            raise HTTPException(status_code=409, detail="draft_already_sent")
+        connection = storage.get_gmail_connection(user["user_id"])
+        if connection is None or connection.revoked_at is not None:
+            raise HTTPException(status_code=409, detail="gmail_authorization_required")
+        if not record.get("gmail_draft_id"):
+            raise HTTPException(status_code=409, detail="gmail_draft_not_created")
+        if record.get("gmail_sync_status") != "synced":
+            raise HTTPException(status_code=409, detail="gmail_sync_not_ready")
+        if record.get("approval_status") != "approved":
+            raise HTTPException(status_code=409, detail="draft_not_approved")
+        content_hash = approval_content_hash(record)
+        if record.get("approved_content_hash") != content_hash:
+            raise HTTPException(status_code=409, detail="draft_approval_stale")
+        result: GmailSendResult = await service.send(
+            user["user_id"], str(draft_id), content_hash
+        )
+        return SendResponse(
+            send_status="sent",
+            sent_at=result.sent_at,
+            gmail_sent_message_id=result.gmail_sent_message_id,
+        )
+    except RecipientValidationError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from None
+    except GmailDraftError as error:
+        raise HTTPException(status_code=error.status_code, detail=error.code) from None
     except HTTPException:
         raise
     except (httpx.HTTPError, ValueError) as error:

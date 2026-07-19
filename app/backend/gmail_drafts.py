@@ -6,17 +6,16 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.message import EmailMessage
-from email.utils import parseaddr
 from pathlib import Path
 from typing import Any, Protocol
 
 import httpx
 
+from email_validation import RecipientValidationError, normalize_recipients
 from gmail_oauth import GmailCredential, GmailOAuthError
 
 GMAIL_DRAFTS_URL = "https://gmail.googleapis.com/gmail/v1/users/me/drafts"
 MAX_RESUME_BYTES = 10 * 1024 * 1024
-EMAIL_PATTERN = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
 
 class GmailDraftError(Exception):
@@ -329,19 +328,10 @@ class GmailDraftService:
 
 
 def _validated_address(value: str | None, required: bool) -> str | None:
-    candidate = value.strip() if isinstance(value, str) else ""
-    if not candidate:
-        if required:
-            raise GmailDraftError("gmail_invalid_recipient", 422)
-        return None
-    parsed_name, parsed_address = parseaddr(candidate)
-    if (
-        parsed_name
-        or parsed_address != candidate
-        or not EMAIL_PATTERN.fullmatch(candidate)
-    ):
-        raise GmailDraftError("gmail_invalid_recipient", 422)
-    return candidate
+    try:
+        return normalize_recipients(value, required=required)
+    except RecipientValidationError:
+        raise GmailDraftError("gmail_invalid_recipient", 422) from None
 
 
 def _safe_pdf_filename(name: str) -> str:

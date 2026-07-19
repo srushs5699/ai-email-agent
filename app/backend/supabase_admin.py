@@ -183,7 +183,8 @@ class SupabaseAdmin:
             params={
                 "select": "id,subject,body,draft_status,created_at,updated_at,"
                 "gmail_draft_id,gmail_message_id,gmail_sync_status,"
-                "gmail_sync_error_code,"
+                "gmail_sync_error_code,approval_status,approved_at,approved_content_hash,"
+                "send_status,sent_at,gmail_sent_message_id,send_error_code,"
                 "outreach_items!generated_drafts_outreach_item_same_owner_fkey(*)",
                 "limit": "1",
                 **params,
@@ -234,7 +235,7 @@ class SupabaseAdmin:
             f"{self._project_url}/rest/v1/generated_drafts",
             params={
                 "select": "id,user_id,subject,body,gmail_draft_id,gmail_message_id,"
-                "gmail_sync_status,outreach_items!"
+                "gmail_sync_status,approval_status,approved_at,approved_content_hash,send_status,sent_at,gmail_sent_message_id,send_error_code,outreach_items!"
                 "generated_drafts_outreach_item_same_owner_fkey("
                 "id,user_id,recipient_to,recipient_cc,selected_resume_id)",
                 "id": f"eq.{draft_id}",
@@ -265,6 +266,47 @@ class SupabaseAdmin:
         if not isinstance(rows, list) or not rows or not isinstance(rows[0], dict):
             return None
         return rows[0]
+
+    def claim_gmail_send(
+        self, draft_id: str, user_id: str, content_hash: str
+    ) -> dict[str, Any] | None:
+        response = httpx.post(
+            f"{self._project_url}/rest/v1/rpc/claim_approved_gmail_send",
+            json={
+                "p_draft_id": draft_id,
+                "p_user_id": user_id,
+                "p_content_hash": content_hash,
+            },
+            headers=self._headers,
+            timeout=30.0,
+        )
+        response.raise_for_status()
+        rows = response.json()
+        if not isinstance(rows, list) or not rows or not isinstance(rows[0], dict):
+            return None
+        return rows[0]
+
+    def finish_gmail_send(
+        self, draft_id: str, user_id: str, gmail_message_id: str
+    ) -> dict[str, Any] | None:
+        return self.update_draft(
+            draft_id,
+            user_id,
+            {
+                "send_status": "sent",
+                "sent_at": datetime.now(timezone.utc).isoformat(),
+                "gmail_sent_message_id": gmail_message_id,
+                "send_error_code": None,
+                "draft_status": "sent",
+            },
+        )
+
+    def fail_gmail_send(self, draft_id: str, user_id: str, error_code: str) -> None:
+        self.update_draft(
+            draft_id,
+            user_id,
+            {"send_status": "failed", "send_error_code": error_code},
+        )
 
     def get_gmail_connection(self, user_id: str) -> GmailConnectionRecord | None:
         try:

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 
-import { createDraft, getLatestDraft, updateDraft } from '../api/drafts'
+import { approveDraft, createDraft, getLatestDraft, sendDraft, updateDraft } from '../api/drafts'
+import { authorizeGmail, createGmailDraft, getGmailStatus, syncGmailDraft, type GmailStatus } from '../api/gmail'
 
 import {
   generateEmail,
@@ -49,6 +50,16 @@ export function OutreachPage() {
   const [errorMessage, setErrorMessage] = useState('')
   const [activeDraftId, setActiveDraftId] = useState<string | null>(null)
   const [saveStatus, setSaveStatus] = useState<'Saving…' | 'Saved' | 'Save failed' | null>(null)
+  const [gmailStatus, setGmailStatus] = useState<GmailStatus | null>(null)
+  const [gmailDraftId, setGmailDraftId] = useState<string | null>(null)
+  const [gmailSyncStatus, setGmailSyncStatus] = useState<string>('not_created')
+  const [gmailPending, setGmailPending] = useState(false)
+  const [gmailError, setGmailError] = useState('')
+  const [approvalStatus, setApprovalStatus] = useState<'pending' | 'approved'>('pending')
+  const [sendStatus, setSendStatus] = useState<'not_sent' | 'sending' | 'failed' | 'sent'>('not_sent')
+  const [sentAt, setSentAt] = useState<string | null>(null)
+  const [sendError, setSendError] = useState('')
+  const syncVersion = useRef(0)
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const saveVersion = useRef(0)
   const savedContent = useRef<string | null>(null)
@@ -57,8 +68,16 @@ export function OutreachPage() {
   const hasUserInput = useRef(false)
 
   const currentContent = generatedEmail
-    ? `${generatedEmail.subject}\u0000${generatedEmail.body}`
+    ? `${form.resume_id}\u0000${form.recipient_to}\u0000${form.recipient_cc}\u0000${generatedEmail.subject}\u0000${generatedEmail.body}`
     : ''
+
+  useEffect(() => {
+    void getGmailStatus().then(setGmailStatus).catch(() => setGmailStatus(null))
+    const params = new URLSearchParams(window.location.search)
+    if (params.has('code') || params.has('state') || params.has('error')) {
+      window.history.replaceState({}, '', window.location.pathname)
+    }
+  }, [])
 
   useEffect(() => {
     latestContent.current = currentContent
@@ -86,7 +105,12 @@ export function OutreachPage() {
           if (hasResume && draft.resume_id) setSelectedResumeId(draft.resume_id)
           setGeneratedEmail({ subject: draft.subject, body: draft.body })
           setActiveDraftId(draft.id)
-          savedContent.current = `${draft.subject}\u0000${draft.body}`
+          setGmailDraftId(draft.gmail_draft_id)
+          setGmailSyncStatus(draft.gmail_sync_status)
+          setApprovalStatus(draft.approval_status === 'approved' ? 'approved' : 'pending')
+          setSendStatus(draft.send_status ?? 'not_sent')
+          setSentAt(draft.sent_at ?? null)
+          savedContent.current = `${draft.resume_id ?? ''}\u0000${draft.recipient_to}\u0000${draft.recipient_cc ?? ''}\u0000${draft.subject}\u0000${draft.body}`
           setSaveStatus('Saved')
         } catch {
           setForm((currentForm) => {
@@ -106,6 +130,7 @@ export function OutreachPage() {
     value: OutreachForm[Key],
   ): void {
     hasUserInput.current = true
+    if (['resume_id', 'recipient_to', 'recipient_cc'].includes(key)) setApprovalStatus('pending')
     setForm((currentForm) => ({ ...currentForm, [key]: value }))
   }
 
@@ -147,7 +172,12 @@ export function OutreachPage() {
       })
       setGeneratedEmail(email)
       if (activeDraftId) {
-        await updateDraft(activeDraftId, { subject: email.subject, body: email.body })
+        await updateDraft(activeDraftId, {
+          subject: email.subject,
+          body: email.body,
+          recipient_to: form.recipient_to.trim(),
+          recipient_cc: form.recipient_cc.trim() || undefined,
+        })
       } else {
         const draft = await createDraft({
           ...form,
@@ -159,8 +189,10 @@ export function OutreachPage() {
           body: email.body,
         })
         setActiveDraftId(draft.id)
+        setGmailDraftId(draft.gmail_draft_id)
+        setGmailSyncStatus(draft.gmail_sync_status)
       }
-      savedContent.current = `${email.subject}\u0000${email.body}`
+      savedContent.current = `${form.recipient_to}\u0000${form.recipient_cc}\u0000${email.subject}\u0000${email.body}`
       setSaveStatus('Saved')
     } catch {
       setErrorMessage('Unable to generate an email right now. Please try again.')
@@ -171,6 +203,7 @@ export function OutreachPage() {
 
   function updateGeneratedEmail(key: keyof GeneratedEmail, value: string): void {
     hasUserInput.current = true
+    setApprovalStatus('pending')
     setGeneratedEmail((currentEmail) =>
       currentEmail ? { ...currentEmail, [key]: value } : null,
     )
@@ -182,11 +215,21 @@ export function OutreachPage() {
     const requestVersion = ++saveVersion.current
     setSaveStatus('Saving…')
     saveTimer.current = setTimeout(() => {
-      void updateDraft(activeDraftId, { subject: generatedEmail.subject, body: generatedEmail.body })
-        .then(() => {
+      void updateDraft(activeDraftId, {
+        subject: generatedEmail.subject,
+        body: generatedEmail.body,
+          recipient_to: form.recipient_to.trim(),
+          recipient_cc: form.recipient_cc.trim() || undefined,
+          resume_id: form.resume_id,
+      })
+        .then((draft) => {
           if (requestVersion === saveVersion.current && currentContent === latestContent.current) {
             savedContent.current = currentContent
             setSaveStatus('Saved')
+            setGmailDraftId(draft.gmail_draft_id)
+            setGmailSyncStatus(draft.gmail_sync_status)
+            setApprovalStatus(draft.approval_status === 'approved' ? 'approved' : 'pending')
+            if (draft.gmail_draft_id) void syncExistingDraft(activeDraftId)
           }
         })
         .catch(() => {
@@ -196,13 +239,97 @@ export function OutreachPage() {
     return () => {
       if (saveTimer.current) clearTimeout(saveTimer.current)
     }
-  }, [activeDraftId, currentContent, generatedEmail])
+  }, [activeDraftId, currentContent, form.recipient_cc, form.recipient_to, generatedEmail])
+
+  async function syncExistingDraft(draftId: string): Promise<void> {
+    const version = ++syncVersion.current
+    setGmailPending(true)
+    setGmailSyncStatus('syncing')
+    setGmailError('')
+    try {
+      const result = await syncGmailDraft(draftId)
+      if (version === syncVersion.current) {
+        setGmailDraftId(result.gmail_draft_id)
+        setGmailSyncStatus(result.sync_status)
+      }
+    } catch {
+      if (version === syncVersion.current) {
+        setGmailSyncStatus('sync_failed')
+        setGmailError('Gmail sync failed. Your website draft is still saved.')
+      }
+    } finally {
+      if (version === syncVersion.current) setGmailPending(false)
+    }
+  }
+
+  async function connectGmail(): Promise<void> {
+    try {
+      const result = await authorizeGmail()
+      window.location.assign(result.authorization_url)
+    } catch {
+      setGmailError('Unable to start Gmail connection.')
+    }
+  }
+
+  async function createDraftInGmail(): Promise<void> {
+    if (!activeDraftId || gmailPending) return
+    setGmailPending(true)
+    setGmailSyncStatus('creating')
+    setGmailError('')
+    try {
+      const result = await createGmailDraft(activeDraftId)
+      setGmailDraftId(result.gmail_draft_id)
+      setGmailSyncStatus(result.sync_status)
+    } catch {
+      setGmailSyncStatus('sync_failed')
+      setGmailError('Unable to create a Gmail draft. Your website draft is still saved.')
+    } finally {
+      setGmailPending(false)
+    }
+  }
 
   async function copyText(text: string): Promise<void> {
     try {
       await navigator.clipboard.writeText(text)
     } catch {
       setErrorMessage('Copy failed. Select the text and copy it manually.')
+    }
+  }
+
+  function validateRecipients(): string | null {
+    const validate = (value: string, required: boolean): boolean => {
+      if (!value.trim()) return !required
+      const values = value.split(/[,;\n]/)
+      return values.every((part) => Boolean(part.trim()) && EMAIL_PATTERN.test(part.trim()))
+    }
+    if (!validate(form.recipient_to, true)) return 'Enter valid To recipient email addresses.'
+    if (!validate(form.recipient_cc, false)) return 'Enter valid CC recipient email addresses.'
+    return null
+  }
+
+  async function handleApprove(): Promise<void> {
+    if (!activeDraftId) return
+    const validation = validateRecipients()
+    if (validation) { setSendError(validation); return }
+    setSendError('')
+    try {
+      await approveDraft(activeDraftId)
+      setApprovalStatus('approved')
+    } catch {
+      setSendError('Approval requires a saved, synchronized Gmail draft with valid recipients.')
+    }
+  }
+
+  async function handleSend(): Promise<void> {
+    if (!activeDraftId || approvalStatus !== 'approved' || sendStatus === 'sending') return
+    const validation = validateRecipients()
+    if (validation) { setSendError(validation); return }
+    setSendStatus('sending'); setSendError('')
+    try {
+      const result = await sendDraft(activeDraftId)
+      setSendStatus('sent'); setSentAt(result.sent_at)
+    } catch {
+      setSendStatus('failed'); setSendError('Email was not sent. You can safely retry after resolving any Gmail issue.')
     }
   }
 
@@ -216,6 +343,13 @@ export function OutreachPage() {
     setForm(initialForm)
     setSelectedResumeId('')
     setSaveStatus(null)
+    setGmailDraftId(null)
+    setGmailSyncStatus('not_created')
+    setGmailError('')
+    setApprovalStatus('pending')
+    setSendStatus('not_sent')
+    setSentAt(null)
+    setSendError('')
     setErrorMessage('')
   }
 
@@ -388,6 +522,32 @@ export function OutreachPage() {
               </button>
             </div>
             {saveStatus && <p aria-live="polite">{saveStatus}</p>}
+            <section aria-label="Gmail draft status" className="outreach-gmail-status">
+              {!gmailStatus?.configured && <p>Gmail integration is unavailable.</p>}
+              {gmailStatus?.configured && !gmailStatus.connected && (
+                <><p>Gmail is not connected.</p><button onClick={() => void connectGmail()} type="button">Connect Gmail</button></>
+              )}
+              {gmailStatus?.connected && <p>Gmail connected{gmailStatus.google_email ? `: ${gmailStatus.google_email}` : ''}</p>}
+              {gmailStatus?.connected && !gmailDraftId && (
+                <button disabled={gmailPending} onClick={() => void createDraftInGmail()} type="button">{gmailPending ? 'Creating Gmail draft…' : 'Create Gmail Draft'}</button>
+              )}
+              {gmailDraftId && <p>{gmailSyncStatus === 'syncing' ? 'Syncing to Gmail…' : gmailSyncStatus === 'synced' ? 'Synced to Gmail' : gmailSyncStatus === 'authorization_required' ? 'Gmail authorization required' : gmailSyncStatus === 'sync_failed' ? 'Gmail sync failed' : 'Gmail draft created'}</p>}
+              {gmailDraftId && gmailSyncStatus === 'sync_failed' && <button disabled={gmailPending} onClick={() => void syncExistingDraft(activeDraftId!)} type="button">Retry Gmail Sync</button>}
+              {gmailError && <p role="alert">{gmailError}</p>}
+            </section>
+            <section aria-label="Email approval and sending" className="outreach-gmail-status">
+              <p>Approval applies only to the current To, CC, subject, body, and selected resume.</p>
+              {sendStatus === 'sent' ? (
+                <p aria-live="polite">Sent{sentAt ? ` at ${new Date(sentAt).toLocaleString()}` : ''}.</p>
+              ) : (
+                <>
+                  <p aria-live="polite">{sendStatus === 'sending' ? 'Sending' : approvalStatus === 'approved' ? 'Approved — ready to send' : sendStatus === 'failed' ? 'Failed — ready to retry' : 'Ready to approve'}</p>
+                  <button disabled={!activeDraftId || gmailPending || gmailSyncStatus !== 'synced' || approvalStatus === 'approved' || sendStatus === 'sending'} onClick={() => void handleApprove()} type="button">Approve Email</button>
+                  <button disabled={!activeDraftId || gmailPending || gmailSyncStatus !== 'synced' || approvalStatus !== 'approved' || sendStatus === 'sending'} onClick={() => void handleSend()} type="button">{sendStatus === 'sending' ? 'Sending…' : 'Send Email'}</button>
+                </>
+              )}
+              {sendError && <p role="alert">{sendError}</p>}
+            </section>
             <div aria-label="Review email actions" className="outreach-secondary-actions">
               <button onClick={startOver} type="button">
                 Start Over

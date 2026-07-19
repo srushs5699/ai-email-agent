@@ -154,7 +154,7 @@ def test_mime_omits_empty_cc_and_rejects_invalid_recipients() -> None:
         decode(build_gmail_mime("to@example.com", " ", "s", "b", "r", PDF))["Cc"]
         is None
     )
-    for invalid in ("", "invalid", "bad@example.com,other@example.com"):
+    for invalid in ("", "invalid", "bad@example.com,"):
         with pytest.raises(GmailDraftError, match="gmail_invalid_recipient"):
             build_gmail_mime(invalid, None, "s", "b", "r", PDF)
     with pytest.raises(GmailDraftError, match="gmail_invalid_recipient"):

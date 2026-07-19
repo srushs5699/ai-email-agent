@@ -19,6 +19,16 @@ export interface Draft extends Omit<DraftInput, 'resume_id'> {
   status: 'draft' | 'ready_for_review'
   created_at: string
   updated_at: string
+  gmail_draft_id: string | null
+  gmail_message_id: string | null
+  gmail_sync_status: 'not_created' | 'creating' | 'synced' | 'syncing' | 'sync_failed' | 'authorization_required'
+  gmail_sync_error_code: string | null
+  approval_status: 'pending' | 'approved' | 'rejected'
+  approved_at: string | null
+  send_status: 'not_sent' | 'sending' | 'failed' | 'sent'
+  sent_at: string | null
+  gmail_sent_message_id: string | null
+  send_error_code: string | null
 }
 
 export function createDraft(input: DraftInput): Promise<Draft> {
@@ -35,11 +45,19 @@ export function getLatestDraft(): Promise<Draft> {
 
 export function updateDraft(
   draftId: string,
-  input: Pick<DraftInput, 'subject' | 'body'>,
+  input: Pick<DraftInput, 'subject' | 'body'> & Partial<Pick<DraftInput, 'recipient_to' | 'recipient_cc' | 'resume_id'>>,
 ): Promise<Draft> {
   return requestProtectedApi<Draft>(`/api/v1/drafts/${draftId}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),
   })
+}
+
+export function approveDraft(draftId: string): Promise<{ approval_status: 'approved'; approved_at: string }> {
+  return requestProtectedApi(`/api/v1/drafts/${draftId}/approve`, { method: 'POST' })
+}
+
+export function sendDraft(draftId: string): Promise<{ send_status: 'sent'; sent_at: string; gmail_sent_message_id: string }> {
+  return requestProtectedApi(`/api/v1/drafts/${draftId}/send`, { method: 'POST' })
 }
