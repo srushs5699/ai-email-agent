@@ -1,3 +1,4 @@
+# ruff: noqa: E501, E701, E702
 import os
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -307,6 +308,267 @@ class SupabaseAdmin:
             user_id,
             {"send_status": "failed", "send_error_code": error_code},
         )
+
+    def _queue(self, queue_id: str, user_id: str) -> dict[str, Any] | None:
+        response = httpx.get(
+            f"{self._project_url}/rest/v1/processing_queues",
+            params={
+                "select": "*,processing_queue_items(*)",
+                "id": f"eq.{queue_id}",
+                "user_id": f"eq.{user_id}",
+                "order": "created_at.desc",
+                "processing_queue_items.order": "position.asc",
+                "limit": "1",
+            },
+            headers=self._headers,
+            timeout=30.0,
+        )
+        response.raise_for_status()
+        rows = response.json()
+        return (
+            rows[0]
+            if isinstance(rows, list) and rows and isinstance(rows[0], dict)
+            else None
+        )
+
+    def create_processing_queue(
+        self, user_id: str, items: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        response = httpx.post(
+            f"{self._project_url}/rest/v1/processing_queues",
+            json={"user_id": user_id, "total_items": len(items)},
+            headers={**self._headers, "Prefer": "return=representation"},
+            timeout=30.0,
+        )
+        response.raise_for_status()
+        queues = response.json()
+        if not isinstance(queues, list) or not queues:
+            raise ValueError("Supabase did not return the queue.")
+        queue = queues[0]
+        rows = [
+            {
+                "queue_id": queue["id"],
+                "user_id": user_id,
+                "position": position,
+                "input_payload": item,
+            }
+            for position, item in enumerate(items)
+        ]
+        item_response = httpx.post(
+            f"{self._project_url}/rest/v1/processing_queue_items",
+            json=rows,
+            headers={**self._headers, "Prefer": "return=representation"},
+            timeout=30.0,
+        )
+        item_response.raise_for_status()
+        return self._queue(queue["id"], user_id) or queue
+
+    def get_processing_queue(
+        self, queue_id: str, user_id: str
+    ) -> dict[str, Any] | None:
+        return self._queue(queue_id, user_id)
+
+    def get_active_processing_queue(self, user_id: str) -> dict[str, Any] | None:
+        response = httpx.get(
+            f"{self._project_url}/rest/v1/processing_queues",
+            params={
+                "select": "*,processing_queue_items(*)",
+                "user_id": f"eq.{user_id}",
+                "status": "in.(draft,running,paused)",
+                "order": "updated_at.desc",
+                "limit": "1",
+            },
+            headers=self._headers,
+            timeout=30.0,
+        )
+        response.raise_for_status()
+        rows = response.json()
+        if not isinstance(rows, list) or not rows or not isinstance(rows[0], dict):
+            return None
+        record = rows[0]
+        record["processing_queue_items"] = sorted(
+            record.get("processing_queue_items", []), key=lambda item: item["position"]
+        )
+        return record
+
+    def remove_processing_queue_item(
+        self, queue_id: str, item_id: str, user_id: str
+    ) -> bool:
+        queue = self._queue(queue_id, user_id)
+        if queue is None or queue.get("status") != "draft":
+            return False
+        response = httpx.delete(
+            f"{self._project_url}/rest/v1/processing_queue_items",
+            params={
+                "id": f"eq.{item_id}",
+                "queue_id": f"eq.{queue_id}",
+                "user_id": f"eq.{user_id}",
+                "status": "eq.pending",
+            },
+            headers={**self._headers, "Prefer": "return=representation"},
+            timeout=30.0,
+        )
+        response.raise_for_status()
+        rows = response.json()
+        if not isinstance(rows, list) or not rows:
+            return False
+        httpx.patch(
+            f"{self._project_url}/rest/v1/processing_queues",
+            params={
+                "id": f"eq.{queue_id}",
+                "user_id": f"eq.{user_id}",
+                "status": "eq.draft",
+            },
+            json={"total_items": max(0, int(queue["total_items"]) - 1)},
+            headers=self._headers,
+            timeout=30.0,
+        ).raise_for_status()
+        return True
+
+    def start_processing_queue(
+        self, queue_id: str, user_id: str, allowed: tuple[str, ...]
+    ) -> dict[str, Any] | None:
+        queue = self._queue(queue_id, user_id)
+        if (
+            queue is None
+            or queue.get("status") not in allowed
+            or not queue.get("processing_queue_items")
+        ):
+            return None
+        response = httpx.patch(
+            f"{self._project_url}/rest/v1/processing_queues",
+            params={
+                "id": f"eq.{queue_id}",
+                "user_id": f"eq.{user_id}",
+                "status": f"in.({','.join(allowed)})",
+            },
+            json={
+                "status": "running",
+                "started_at": datetime.now(timezone.utc).isoformat(),
+            },
+            headers={**self._headers, "Prefer": "return=representation"},
+            timeout=30.0,
+        )
+        response.raise_for_status()
+        rows = response.json()
+        return (
+            self._queue(queue_id, user_id) if isinstance(rows, list) and rows else None
+        )
+
+    def pause_processing_queue(
+        self, queue_id: str, user_id: str
+    ) -> dict[str, Any] | None:
+        queue = self._queue(queue_id, user_id)
+        if queue is None:
+            return None
+        if queue.get("status") == "running":
+            httpx.patch(
+                f"{self._project_url}/rest/v1/processing_queues",
+                params={
+                    "id": f"eq.{queue_id}",
+                    "user_id": f"eq.{user_id}",
+                    "status": "eq.running",
+                },
+                json={
+                    "status": "paused",
+                    "paused_at": datetime.now(timezone.utc).isoformat(),
+                },
+                headers=self._headers,
+                timeout=30.0,
+            ).raise_for_status()
+        return self._queue(queue_id, user_id)
+
+    def claim_next_processing_queue_item(
+        self, queue_id: str, user_id: str
+    ) -> dict[str, Any] | None:
+        response = httpx.post(
+            f"{self._project_url}/rest/v1/rpc/claim_next_processing_queue_item",
+            json={"p_queue_id": queue_id, "p_user_id": user_id},
+            headers=self._headers,
+            timeout=30.0,
+        )
+        response.raise_for_status()
+        rows = response.json()
+        return (
+            rows[0]
+            if isinstance(rows, list) and rows and isinstance(rows[0], dict)
+            else None
+        )
+
+    def recover_stale_processing_queue_items(self, queue_id: str, user_id: str) -> None:
+        httpx.post(
+            f"{self._project_url}/rest/v1/rpc/recover_stale_processing_queue_items",
+            json={"p_queue_id": queue_id, "p_user_id": user_id},
+            headers=self._headers,
+            timeout=30.0,
+        ).raise_for_status()
+
+    def complete_processing_queue_item(
+        self, item_id: str, user_id: str, draft_id: str
+    ) -> None:
+        response = httpx.patch(
+            f"{self._project_url}/rest/v1/processing_queue_items",
+            params={
+                "id": f"eq.{item_id}",
+                "user_id": f"eq.{user_id}",
+                "status": "eq.processing",
+            },
+            json={
+                "status": "completed",
+                "generated_draft_id": draft_id,
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+                "processing_lease_expires_at": None,
+            },
+            headers={**self._headers, "Prefer": "return=representation"},
+            timeout=30.0,
+        )
+        response.raise_for_status()
+
+    def fail_processing_queue_item(
+        self, item_id: str, user_id: str, error_code: str
+    ) -> None:
+        httpx.patch(
+            f"{self._project_url}/rest/v1/processing_queue_items",
+            params={
+                "id": f"eq.{item_id}",
+                "user_id": f"eq.{user_id}",
+                "status": "eq.processing",
+            },
+            json={
+                "status": "failed",
+                "error_code": error_code,
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+                "processing_lease_expires_at": None,
+            },
+            headers=self._headers,
+            timeout=30.0,
+        ).raise_for_status()
+
+    def finish_processing_queue_if_done(self, queue_id: str, user_id: str) -> None:
+        queue = self._queue(queue_id, user_id)
+        if queue is None or queue.get("status") != "running":
+            return
+        items = queue.get("processing_queue_items", [])
+        pending = any(item.get("status") in {"pending", "processing"} for item in items)
+        if not pending:
+            failed = sum(item.get("status") == "failed" for item in items)
+            completed = sum(item.get("status") == "completed" for item in items)
+            httpx.patch(
+                f"{self._project_url}/rest/v1/processing_queues",
+                params={
+                    "id": f"eq.{queue_id}",
+                    "user_id": f"eq.{user_id}",
+                    "status": "eq.running",
+                },
+                json={
+                    "status": "completed_with_failures" if failed else "completed",
+                    "completed_items": completed,
+                    "failed_items": failed,
+                    "completed_at": datetime.now(timezone.utc).isoformat(),
+                },
+                headers=self._headers,
+                timeout=30.0,
+            ).raise_for_status()
 
     def get_gmail_connection(self, user_id: str) -> GmailConnectionRecord | None:
         try:

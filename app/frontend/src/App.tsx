@@ -7,6 +7,7 @@ import BackendStatus from './components/BackendStatus'
 import AuthStatus from './components/AuthStatus'
 import { OutreachPage } from './pages/OutreachPage'
 import { ResumeLibraryPage } from './pages/ResumeLibraryPage'
+import { ProcessingQueuePage } from './pages/ProcessingQueuePage'
 
 function AuthenticationLoading() {
   return <p>Checking authentication...</p>
@@ -59,7 +60,7 @@ function DashboardPage() {
       <p>Prepare a resume, generate an outreach email, then copy it into Gmail.</p>
 
       <nav aria-label="Application">
-        <Link to="/resumes">Resume Library</Link> <Link to="/outreach">Compose outreach</Link>
+        <Link to="/resumes">Resume Library</Link> <Link to="/outreach">Compose outreach</Link> <Link to="/processing-queue">Processing Queue</Link>
       </nav>
 
       <AuthStatus />
@@ -100,6 +101,7 @@ function App() {
               </ProtectedRoute>
             }
           />
+          <Route path="/processing-queue" element={<ProtectedRoute><ProcessingQueuePage /></ProtectedRoute>} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </AuthProvider>
