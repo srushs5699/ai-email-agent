@@ -16,7 +16,7 @@ export interface DraftInput {
 export interface Draft extends Omit<DraftInput, 'resume_id'> {
   id: string
   resume_id: string | null
-  status: 'draft' | 'ready_for_review'
+  status: 'draft' | 'ready_for_review' | 'sent' | 'rejected' | 'deleted'
   created_at: string
   updated_at: string
   gmail_draft_id: string | null
@@ -41,6 +41,22 @@ export function createDraft(input: DraftInput): Promise<Draft> {
 
 export function getLatestDraft(): Promise<Draft> {
   return requestProtectedApi<Draft>('/api/v1/drafts/latest')
+}
+
+export function listReviewDrafts(): Promise<{ drafts: Draft[] }> {
+  return requestProtectedApi('/api/v1/drafts')
+}
+
+export function regenerateDraft(draftId: string): Promise<Draft> {
+  return requestProtectedApi(`/api/v1/drafts/${draftId}/regenerate`, { method: 'POST' })
+}
+
+export function rejectDraft(draftId: string): Promise<void> {
+  return requestProtectedApi(`/api/v1/drafts/${draftId}/reject`, { method: 'POST' })
+}
+
+export function deleteDraft(draftId: string): Promise<void> {
+  return requestProtectedApi(`/api/v1/drafts/${draftId}`, { method: 'DELETE' })
 }
 
 export function updateDraft(

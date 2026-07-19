@@ -1,3 +1,4 @@
+# ruff: noqa: E501, E701
 import logging
 from datetime import datetime, timezone
 from typing import Annotated, Any
@@ -8,6 +9,13 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, field_validator
 
 from auth import AuthenticatedUser, get_current_user
+from email_generation import (
+    EmailGenerationRequest,
+    EmailGenerator,
+    ProviderUnavailableError,
+    build_generation_prompt,
+    get_email_generator,
+)
 from email_validation import (
     RecipientValidationError,
     approval_content_hash,
@@ -146,6 +154,7 @@ def get_gmail_send_service(storage: Storage) -> GmailSendService:
 
 
 GmailSend = Annotated[GmailSendService, Depends(get_gmail_send_service)]
+Generator = Annotated[EmailGenerator, Depends(get_email_generator)]
 
 
 class ApprovalResponse(BaseModel):
@@ -157,6 +166,10 @@ class SendResponse(BaseModel):
     send_status: str
     sent_at: str
     gmail_sent_message_id: str
+
+
+class DraftListResponse(BaseModel):
+    drafts: list[DraftResponse]
 
 
 def _response(record: dict[str, Any]) -> DraftResponse:
@@ -274,6 +287,19 @@ def get_latest_draft(user: CurrentUser, storage: Storage) -> DraftResponse:
         raise _persistence_error(error) from error
 
 
+@router.get("", response_model=DraftListResponse)
+def list_review_drafts(user: CurrentUser, storage: Storage) -> DraftListResponse:
+    try:
+        return DraftListResponse(
+            drafts=[
+                _response(record)
+                for record in storage.list_review_drafts(user["user_id"])
+            ]
+        )
+    except (httpx.HTTPError, ValueError) as error:
+        raise _persistence_error(error) from error
+
+
 @router.get("/{draft_id}", response_model=DraftResponse)
 def get_draft(draft_id: UUID, user: CurrentUser, storage: Storage) -> DraftResponse:
     try:
@@ -360,6 +386,96 @@ def update_draft(
         raise
     except (httpx.HTTPError, ValueError) as error:
         raise _persistence_error(error) from error
+
+
+@router.post("/{draft_id}/regenerate", response_model=DraftResponse)
+def regenerate_draft(
+    draft_id: UUID, user: CurrentUser, storage: Storage, generator: Generator
+) -> DraftResponse:
+    try:
+        existing = storage.get_draft(str(draft_id), user["user_id"])
+        if existing is None or existing.get("draft_status") not in {
+            "draft",
+            "ready_for_review",
+        }:
+            raise HTTPException(404, "Draft not found.")
+        outreach = existing.get("outreach_items")
+        if not isinstance(outreach, dict):
+            raise ValueError("Supabase returned an invalid draft.")
+        resume_id = outreach.get("selected_resume_id")
+        if not isinstance(resume_id, str):
+            raise HTTPException(
+                422, "The selected resume is not ready for email generation."
+            )
+        resume = storage.get_resume(resume_id, user["user_id"])
+        if (
+            resume is None
+            or resume.get("parse_status") != "completed"
+            or not isinstance(resume.get("extracted_text"), str)
+        ):
+            raise HTTPException(
+                422, "The selected resume is not ready for email generation."
+            )
+        request = EmailGenerationRequest(
+            resume_id=UUID(resume_id),
+            linkedin_post_text=outreach.get("linkedin_post_text") or "",
+            job_description_text=outreach.get("job_description_text") or "",
+            no_job_description=outreach.get("no_job_description", False),
+            recipient_to=outreach["recipient_to"],
+            recipient_cc=outreach.get("recipient_cc"),
+            recipient_name=outreach.get("recipient_name"),
+            company_name=outreach.get("company_name"),
+        )
+        generated = generator.generate(
+            build_generation_prompt(resume["extracted_text"], request)
+        )
+        updated = storage.update_draft(
+            str(draft_id),
+            user["user_id"],
+            {
+                "subject": generated.subject,
+                "body": generated.body,
+                "draft_status": "ready_for_review",
+                "approval_status": "pending",
+                "approved_at": None,
+                "approved_content_hash": None,
+            },
+        )
+        if updated is None:
+            raise HTTPException(404, "Draft not found.")
+        return _response({**updated, "outreach_items": outreach})
+    except ProviderUnavailableError as error:
+        raise HTTPException(
+            502, "Email generation is temporarily unavailable. Please try again."
+        ) from error
+    except ValueError as error:
+        raise HTTPException(
+            502, "Email generation returned an invalid response. Please try again."
+        ) from error
+    except HTTPException:
+        raise
+    except httpx.HTTPError as error:
+        raise _persistence_error(error) from error
+
+
+@router.post("/{draft_id}/reject", status_code=status.HTTP_204_NO_CONTENT)
+def reject_draft(draft_id: UUID, user: CurrentUser, storage: Storage) -> None:
+    record = storage.update_draft(
+        str(draft_id),
+        user["user_id"],
+        {"draft_status": "rejected", "approval_status": "rejected"},
+    )
+    if record is None:
+        raise HTTPException(404, "Draft not found.")
+
+
+@router.delete("/{draft_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_draft(draft_id: UUID, user: CurrentUser, storage: Storage) -> None:
+    record = storage.update_draft(
+        str(draft_id), user["user_id"], {"draft_status": "deleted"}
+    )
+    if record is None:
+        raise HTTPException(404, "Draft not found.")
 
 
 @router.post("/{draft_id}/approve", response_model=ApprovalResponse)

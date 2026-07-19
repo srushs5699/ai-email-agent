@@ -1,14 +1,6 @@
-.outreach-page {
-  width: 100%;
-  padding: 48px 24px 64px;
-  box-sizing: border-box;
-  text-align: left;
-}
+.outreach-page { width: min(1200px, calc(100% - 48px)); margin: 0 auto; padding: 48px 0 64px; box-sizing: border-box; text-align: left; }
 
-.outreach-container {
-  width: min(100%, 960px);
-  margin: 0 auto;
-}
+.outreach-container { width: min(100%, 1040px); margin: 0; }
 
 .outreach-page__header {
   margin-bottom: 32px;
@@ -22,7 +14,7 @@
   padding: 28px;
   border: 1px solid var(--border);
   border-radius: 10px;
-  background: var(--bg);
+  background: var(--surface);
   box-shadow: var(--shadow);
 }
 
@@ -122,9 +114,10 @@
 }
 
 .outreach-page button {
+  min-height: 42px;
   padding: 10px 16px;
   border: 1px solid var(--accent);
-  border-radius: 6px;
+  border-radius: 8px;
   color: #fff;
   background: var(--accent);
   font: inherit;
@@ -160,10 +153,11 @@
   background: transparent;
   border-color: var(--border);
 }
+.outreach-gmail-status { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 12px; padding: 16px; border: 1px solid var(--border); border-radius: 8px; background: #111620; }.outreach-gmail-status p { flex-basis: 100%; margin: 0; }.outreach-panel [role='alert'] { margin: 16px 0 0; padding: 10px 12px; border-radius: 8px; color: var(--error); background: var(--error-soft); }
 
 @media (max-width: 640px) {
   .outreach-page {
-    padding: 28px 16px 40px;
+    width: min(100% - 32px, 1200px); padding: 48px 0;
   }
 
   .outreach-panel {

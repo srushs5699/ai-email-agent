@@ -178,6 +178,29 @@ class SupabaseAdmin:
             }
         )
 
+    def list_review_drafts(self, user_id: str) -> list[dict[str, Any]]:
+        response = httpx.get(
+            f"{self._project_url}/rest/v1/generated_drafts",
+            params={
+                "select": "id,subject,body,draft_status,created_at,updated_at,"
+                "gmail_draft_id,gmail_message_id,gmail_sync_status,"
+                "gmail_sync_error_code,approval_status,approved_at,send_status,"
+                "sent_at,gmail_sent_message_id,send_error_code,"
+                "outreach_items!generated_drafts_outreach_item_same_owner_fkey(*)",
+                "user_id": f"eq.{user_id}",
+                "draft_status": "in.(draft,ready_for_review)",
+                "send_status": "neq.sent",
+                "order": "updated_at.desc",
+            },
+            headers=self._headers,
+            timeout=30.0,
+        )
+        response.raise_for_status()
+        rows = response.json()
+        if not isinstance(rows, list):
+            raise ValueError("Supabase returned an invalid draft list.")
+        return [row for row in rows if isinstance(row, dict)]
+
     def _get_drafts(self, params: dict[str, str]) -> dict[str, Any] | None:
         response = httpx.get(
             f"{self._project_url}/rest/v1/generated_drafts",

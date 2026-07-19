@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type { Session } from '@supabase/supabase-js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -89,25 +89,16 @@ describe('App', () => {
     arrangeAuth(authenticatedSession)
     renderAt('/')
 
-    expect(
-      await screen.findByText('Backend connected successfully.'),
-    ).toBeInTheDocument()
+    await waitFor(() => expect(screen.getAllByText('Connected')).toHaveLength(2))
     expect(screen.getByText('Signed in as')).toBeInTheDocument()
-    expect(
-      await screen.findByText(
-        'Signed-in backend identity confirmed for',
-        { exact: false },
-      ),
-    ).toBeInTheDocument()
+    expect(screen.getByText('person@example.com')).toBeInTheDocument()
   })
 
   it('redirects an authenticated user from login to the dashboard', async () => {
     arrangeAuth(authenticatedSession)
     renderAt('/login')
 
-    expect(
-      await screen.findByText('Backend connected successfully.'),
-    ).toBeInTheDocument()
+    await waitFor(() => expect(screen.getAllByText('Connected')).toHaveLength(2))
   })
 
   it('shows an authentication-loading state while the session is restored', () => {
@@ -121,21 +112,18 @@ describe('App', () => {
     arrangeAuth(authenticatedSession)
     renderAt('/')
 
-    expect(
-      await screen.findByText('Backend connected successfully.'),
-    ).toBeInTheDocument()
+    await waitFor(() => expect(screen.getAllByText('Connected')).toHaveLength(2))
   })
 
-  it('shows a loading state while the protected backend identity is checked', async () => {
+  it('keeps backend identity verification active without repeating account details', async () => {
     backendAuthMocks.getAuthenticatedBackendIdentity.mockImplementation(
       () => new Promise(() => undefined),
     )
     arrangeAuth(authenticatedSession)
     renderAt('/')
 
-    expect(
-      await screen.findByText('Verifying signed-in backend session...'),
-    ).toBeInTheDocument()
+    await waitFor(() => expect(screen.getAllByText('Connected')).toHaveLength(2))
+    expect(screen.queryByText('Verifying signed-in backend session...')).not.toBeInTheDocument()
   })
 
   it('shows a safe message for a non-401 backend error', async () => {
@@ -171,9 +159,7 @@ describe('App', () => {
     arrangeAuth(authenticatedSession)
     renderAt('/')
 
-    await screen.findByText('Signed-in backend identity confirmed for', {
-      exact: false,
-    })
+    await screen.findByText('person@example.com')
 
     expect(
       screen.queryByText('access-token-that-must-not-be-rendered'),
@@ -193,5 +179,25 @@ describe('App', () => {
       await screen.findByRole('button', { name: 'Continue with Google' }),
     ).toBeInTheDocument()
     expect(supabaseAuthMocks.signOut).toHaveBeenCalledWith({ scope: 'local' })
+  })
+
+  it('renders navigational links and dashboard quick actions for authenticated users', async () => {
+    arrangeAuth(authenticatedSession)
+    renderAt('/')
+
+    expect(await screen.findByRole('navigation', { name: 'Application navigation' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Resumes' })).toHaveAttribute('href', '/resumes')
+    expect(screen.getByRole('link', { name: 'Manage resumes' })).toHaveAttribute('href', '/resumes')
+    expect(screen.getByRole('link', { name: 'Create outreach' })).toHaveAttribute('href', '/outreach')
+    expect(screen.getByRole('link', { name: 'Home' })).toHaveAttribute('aria-current', 'page')
+    expect(screen.getAllByRole('article')).toHaveLength(4)
+  })
+
+  it('renders a reusable back control on an authenticated subpage', async () => {
+    arrangeAuth(authenticatedSession)
+    renderAt('/resumes')
+
+    expect(await screen.findByRole('button', { name: '← Back' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Resumes' })).toHaveAttribute('aria-current', 'page')
   })
 })

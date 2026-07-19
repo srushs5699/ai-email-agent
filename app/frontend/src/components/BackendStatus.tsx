@@ -25,14 +25,14 @@ function BackendStatus() {
   }, []);
 
   if (connectionState === "checking") {
-    return <p>Checking backend connection...</p>;
+    return <p><span className="status-label">Backend</span><span className="status-badge status-badge--pending">Checking</span></p>;
   }
 
   if (connectionState === "failed") {
-    return <p role="alert">Backend connection failed.</p>;
+    return <p role="alert"><span className="status-label">Backend</span><span className="status-badge status-badge--error">Unavailable</span></p>;
   }
 
-  return <p>Backend connected successfully.</p>;
+  return <p><span className="status-label">Backend</span><span className="status-badge status-badge--success">Connected</span></p>;
 }
 
 export default BackendStatus;

@@ -9,7 +9,7 @@ type IdentityState =
   | { email: string | null; status: 'confirmed' }
   | { message: string; status: 'failed' }
 
-function AuthenticatedBackendStatus() {
+function AuthenticatedBackendStatus({ showSuccess = true }: { showSuccess?: boolean }) {
   const { handleExpiredSession, session } = useAuth()
   const [identityState, setIdentityState] = useState<IdentityState>({
     status: 'checking',
@@ -60,19 +60,19 @@ function AuthenticatedBackendStatus() {
   }, [handleExpiredSession, session])
 
   if (identityState.status === 'checking') {
-    return <p>Verifying signed-in backend session...</p>
+    return showSuccess ? <p><span className="status-badge status-badge--pending">Verifying signed-in backend session...</span></p> : null
   }
 
   if (identityState.status === 'failed') {
-    return <p role="alert">{identityState.message}</p>
+    return <p role="alert"><span className="status-badge status-badge--error">{identityState.message}</span></p>
   }
 
-  return (
-    <p>
+  return showSuccess ? (
+    <p><span className="status-badge status-badge--success">
       Signed-in backend identity confirmed for{' '}
       <strong>{identityState.email ?? 'your account'}</strong>.
-    </p>
-  )
+    </span></p>
+  ) : null
 }
 
 export default AuthenticatedBackendStatus
