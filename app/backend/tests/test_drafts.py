@@ -27,7 +27,8 @@ class FakeDraftStorage:
         self, outreach_item: dict[str, Any], draft: dict[str, Any]
     ) -> dict[str, Any]:
         draft_id = f"00000000-0000-0000-0000-00000000000{len(self.drafts) + 3}"
-        outreach = {**outreach_item, "id": f"outreach-{draft_id}"}
+        outreach_id = f"00000000-0000-0000-0000-{len(self.drafts) + 100:012d}"
+        outreach = {**outreach_item, "id": outreach_id}
         record = {
             **draft,
             "id": draft_id,
