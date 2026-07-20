@@ -18,7 +18,8 @@ class Response:
 
 def queue(status: str, item_statuses: list[str]) -> dict[str, Any]:
     return {
-        "id": "queue-1", "status": status,
+        "id": "queue-1",
+        "status": status,
         "processing_queue_items": [{"status": value} for value in item_statuses],
     }
 

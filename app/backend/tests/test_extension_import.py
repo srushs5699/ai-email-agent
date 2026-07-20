@@ -1,6 +1,8 @@
 import pytest
 
+from auth import AuthenticatedUser
 from extension_import import (
+    ExtensionImportStorage,
     ImportRequest,
     JobPageError,
     _failed,
@@ -10,6 +12,45 @@ from extension_import import (
     normalize_public_url,
 )
 from supabase_admin import ExtensionQueueAppendError
+
+
+def authenticated_user(
+    user_id: str = "user-1",
+    email: str = "user-1@example.com",
+) -> AuthenticatedUser:
+    return {"user_id": user_id, "email": email}
+
+
+class ExtensionImportTestStorage(ExtensionImportStorage):
+    def find_extension_duplicate(
+        self, user_id: str, linkedin_post_url: str
+    ) -> dict[str, object] | None:
+        return None
+
+    def repair_extension_orphan(
+        self,
+        user_id: str,
+        outreach_item_id: str,
+        metadata: dict[str, object],
+    ) -> dict[str, object] | None:
+        return None
+
+    def append_extension_processing_queue_item(
+        self, user_id: str, metadata: dict[str, object]
+    ) -> dict[str, object]:
+        raise AssertionError("append_extension_processing_queue_item was not expected")
+
+    def create_extension_failed_task(
+        self,
+        user_id: str,
+        metadata: dict[str, object],
+        reason: str,
+        stage: str,
+    ) -> dict[str, object]:
+        raise AssertionError("create_extension_failed_task was not expected")
+
+    def get_failed_task(self, item_id: str, user_id: str) -> dict[str, object] | None:
+        return None
 
 
 def test_html_is_sanitized_to_readable_job_text() -> None:
@@ -55,7 +96,7 @@ def test_success_persists_all_capture_fields_and_queue_relationship(
 ) -> None:
     saved: dict[str, object] = {}
 
-    class Storage:
+    class Storage(ExtensionImportTestStorage):
         def find_extension_duplicate(self, *_: object) -> None:
             return None
 
@@ -89,7 +130,7 @@ def test_success_persists_all_capture_fields_and_queue_relationship(
                 "captured_at": "2026-07-19T00:00:00Z",
             }
         ),
-        {"user_id": "user-1"},
+        authenticated_user(),
         Storage(),
     )
     assert result.status == "queued" and result.outreach_item_id
@@ -158,10 +199,10 @@ def test_success_persists_all_capture_fields_and_queue_relationship(
     ],
 )
 def test_existing_visible_records_return_location_and_open_path(
-    monkeypatch: pytest.MonkeyPatch, match: dict[str, str], reason: str, path: str
+    monkeypatch: pytest.MonkeyPatch, match: dict[str, object], reason: str, path: str
 ) -> None:
-    class Storage:
-        def find_extension_duplicate(self, *_: object) -> dict[str, str]:
+    class Storage(ExtensionImportTestStorage):
+        def find_extension_duplicate(self, *_: object) -> dict[str, object]:
             return match
 
     monkeypatch.setattr("extension_import.normalize_public_url", lambda url: url)
@@ -175,7 +216,7 @@ def test_existing_visible_records_return_location_and_open_path(
             "captured_at": "2026-07-19T00:00:00Z",
         }
     )
-    result = import_capture(request, {"user_id": "user-1"}, Storage())
+    result = import_capture(request, authenticated_user(), Storage())
     assert (
         result.status == "duplicate"
         and result.reason == reason
@@ -186,8 +227,8 @@ def test_existing_visible_records_return_location_and_open_path(
 def test_orphaned_outreach_is_repaired_instead_of_reported_as_duplicate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class Storage:
-        def find_extension_duplicate(self, *_: object) -> dict[str, str]:
+    class Storage(ExtensionImportTestStorage):
+        def find_extension_duplicate(self, *_: object) -> dict[str, object]:
             return {
                 "record_type": "orphaned_outreach",
                 "outreach_item_id": "00000000-0000-0000-0000-000000000012",
@@ -214,16 +255,14 @@ def test_orphaned_outreach_is_repaired_instead_of_reported_as_duplicate(
             "captured_at": "2026-07-19T00:00:00Z",
         }
     )
-    assert (
-        import_capture(request, {"user_id": "user-1"}, Storage()).status == "repaired"
-    )
+    assert import_capture(request, authenticated_user(), Storage()).status == "repaired"
 
 
 def test_empty_orphan_repair_response_falls_back_to_a_new_import(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class Storage:
-        def find_extension_duplicate(self, *_: object) -> dict[str, str]:
+    class Storage(ExtensionImportTestStorage):
+        def find_extension_duplicate(self, *_: object) -> dict[str, object]:
             return {
                 "record_type": "orphaned_outreach",
                 "outreach_item_id": "00000000-0000-0000-0000-000000000012",
@@ -257,7 +296,7 @@ def test_empty_orphan_repair_response_falls_back_to_a_new_import(
             "captured_at": "2026-07-19T00:00:00Z",
         }
     )
-    assert import_capture(request, {"user_id": "user-1"}, Storage()).outcome == "queued"
+    assert import_capture(request, authenticated_user(), Storage()).outcome == "queued"
 
 
 def test_duplicate_url_is_normalized_before_lookup(
@@ -265,7 +304,7 @@ def test_duplicate_url_is_normalized_before_lookup(
 ) -> None:
     looked_up: list[str] = []
 
-    class Storage:
+    class Storage(ExtensionImportTestStorage):
         def find_extension_duplicate(self, _user: str, url: str) -> None:
             looked_up.append(url)
             return None
@@ -296,18 +335,24 @@ def test_duplicate_url_is_normalized_before_lookup(
             "captured_at": "2026-07-19T00:00:00Z",
         }
     )
-    import_capture(request, {"user_id": "user-1"}, Storage())
+    import_capture(request, authenticated_user(), Storage())
     assert looked_up == ["https://www.linkedin.com/feed/1"]
 
 
 def test_missing_jd_is_queued_and_does_not_create_failed_task(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class Storage:
+    class Storage(ExtensionImportTestStorage):
         def find_extension_duplicate(self, *_: object) -> None:
             return None
 
-        def create_extension_failed_task(self, *_: object) -> object:
+        def create_extension_failed_task(
+            self,
+            user_id: str,
+            metadata: dict[str, object],
+            reason: str,
+            stage: str,
+        ) -> dict[str, object]:
             raise AssertionError(
                 "recoverable anti-bot result must not create a failed task"
             )
@@ -339,7 +384,7 @@ def test_missing_jd_is_queued_and_does_not_create_failed_task(
             "captured_at": "2026-07-19T00:00:00Z",
         }
     )
-    result = import_capture(request, {"user_id": "user-1"}, Storage())
+    result = import_capture(request, authenticated_user(), Storage())
     assert (
         result.outcome == "queued"
         and result.status == "queued"
@@ -352,11 +397,17 @@ def test_exact_blocked_jd_workflow_queues_without_failed_or_existing_state(
 ) -> None:
     saved: dict[str, object] = {}
 
-    class Storage:
+    class Storage(ExtensionImportTestStorage):
         def find_extension_duplicate(self, *_: object) -> None:
             return None
 
-        def create_extension_failed_task(self, *_: object) -> object:
+        def create_extension_failed_task(
+            self,
+            user_id: str,
+            metadata: dict[str, object],
+            reason: str,
+            stage: str,
+        ) -> dict[str, object]:
             raise AssertionError("JD unavailability must not create Failed Tasks")
 
         def append_extension_processing_queue_item(
@@ -390,7 +441,7 @@ def test_exact_blocked_jd_workflow_queues_without_failed_or_existing_state(
             "captured_at": "2026-07-19T00:00:00Z",
         }
     )
-    result = import_capture(request, {"user_id": "user-1"}, Storage())
+    result = import_capture(request, authenticated_user(), Storage())
     assert result.outcome == "queued" and result.queue_id and result.outreach_item_id
     assert (
         saved["linkedin_post_url"]
@@ -403,7 +454,7 @@ def test_exact_blocked_jd_workflow_queues_without_failed_or_existing_state(
 
 
 def test_old_failed_row_is_not_a_duplicate(monkeypatch: pytest.MonkeyPatch) -> None:
-    class Storage:
+    class Storage(ExtensionImportTestStorage):
         def find_extension_duplicate(self, *_: object) -> None:
             return None
 
@@ -431,13 +482,13 @@ def test_old_failed_row_is_not_a_duplicate(monkeypatch: pytest.MonkeyPatch) -> N
             "captured_at": "2026-07-19T00:00:00Z",
         }
     )
-    assert import_capture(request, {"user_id": "user-1"}, Storage()).outcome == "queued"
+    assert import_capture(request, authenticated_user(), Storage()).outcome == "queued"
 
 
 def test_queue_append_error_is_reported_without_creating_a_failed_task(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class Storage:
+    class Storage(ExtensionImportTestStorage):
         def find_extension_duplicate(self, *_: object) -> None:
             return None
 
@@ -448,7 +499,13 @@ def test_queue_append_error_is_reported_without_creating_a_failed_task(
                 "Processing Queue append was rejected (400): batch is full"
             )
 
-        def create_extension_failed_task(self, *_: object) -> object:
+        def create_extension_failed_task(
+            self,
+            user_id: str,
+            metadata: dict[str, object],
+            reason: str,
+            stage: str,
+        ) -> dict[str, object]:
             raise AssertionError("queue RPC error must not create Failed Tasks")
 
     monkeypatch.setattr("extension_import.normalize_public_url", lambda url: url)
@@ -462,7 +519,7 @@ def test_queue_append_error_is_reported_without_creating_a_failed_task(
             "captured_at": "2026-07-19T00:00:00Z",
         }
     )
-    result = import_capture(request, {"user_id": "user-1"}, Storage())
+    result = import_capture(request, authenticated_user(), Storage())
     assert result.outcome == "error" and "batch is full" in (result.reason or "")
 
 
@@ -490,7 +547,7 @@ def test_protected_or_unavailable_jd_outcomes_are_nonfatal(
 def test_manual_jd_source_is_persisted(monkeypatch: pytest.MonkeyPatch) -> None:
     saved: dict[str, object] = {}
 
-    class Storage:
+    class Storage(ExtensionImportTestStorage):
         def find_extension_duplicate(self, *_: object) -> None:
             return None
 
@@ -519,12 +576,12 @@ def test_manual_jd_source_is_persisted(monkeypatch: pytest.MonkeyPatch) -> None:
             "captured_at": "2026-07-19T00:00:00Z",
         }
     )
-    assert import_capture(request, {"user_id": "user-1"}, Storage()).status == "queued"
+    assert import_capture(request, authenticated_user(), Storage()).status == "queued"
     assert saved["job_description_source"] == "manual"
 
 
 def test_terminal_failure_is_verified_before_failed_response_is_returned() -> None:
-    class Storage:
+    class Storage(ExtensionImportTestStorage):
         def create_extension_failed_task(
             self, user_id: str, metadata: dict[str, object], reason: str, stage: str
         ) -> dict[str, object]:
@@ -558,7 +615,7 @@ def test_terminal_failure_is_verified_before_failed_response_is_returned() -> No
 
 
 def test_unverified_failed_insert_never_claims_failed_tasks() -> None:
-    class Storage:
+    class Storage(ExtensionImportTestStorage):
         def create_extension_failed_task(self, *_: object) -> dict[str, object]:
             return {"id": "00000000-0000-0000-0000-000000000099", "status": "failed"}
 

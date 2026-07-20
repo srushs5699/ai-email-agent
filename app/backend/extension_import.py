@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 import re
 from html.parser import HTMLParser
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal, Protocol
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from uuid import UUID
 
@@ -19,14 +19,44 @@ from auth import AuthenticatedUser, get_current_user
 from supabase_admin import (
     ExtensionOrphanRepairError,
     ExtensionQueueAppendError,
-    SupabaseAdmin,
     get_supabase_admin,
 )
 
 router = APIRouter(prefix="/api/v1/extension", tags=["extension import"])
 CurrentUser = Annotated[AuthenticatedUser, Depends(get_current_user)]
-Storage = Annotated[SupabaseAdmin, Depends(get_supabase_admin)]
 logger = logging.getLogger(__name__)
+
+
+class ExtensionImportStorage(Protocol):
+    """Storage operations required by the extension-import endpoint."""
+
+    def find_extension_duplicate(
+        self, user_id: str, linkedin_post_url: str
+    ) -> dict[str, Any] | None: ...
+
+    def repair_extension_orphan(
+        self,
+        user_id: str,
+        outreach_item_id: str,
+        metadata: dict[str, object],
+    ) -> dict[str, Any] | None: ...
+
+    def append_extension_processing_queue_item(
+        self, user_id: str, metadata: dict[str, object]
+    ) -> dict[str, Any]: ...
+
+    def create_extension_failed_task(
+        self,
+        user_id: str,
+        metadata: dict[str, object],
+        reason: str,
+        stage: str,
+    ) -> dict[str, Any]: ...
+
+    def get_failed_task(self, item_id: str, user_id: str) -> dict[str, Any] | None: ...
+
+
+Storage = Annotated[ExtensionImportStorage, Depends(get_supabase_admin)]
 
 
 class ImportRequest(BaseModel):
@@ -380,7 +410,7 @@ def import_capture(
 
 
 def _failed(
-    storage: SupabaseAdmin,
+    storage: ExtensionImportStorage,
     user_id: str,
     metadata: dict[str, object],
     reason: str,

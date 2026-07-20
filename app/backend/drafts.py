@@ -252,8 +252,8 @@ def create_draft(
         )
     outreach = {
         "user_id": user["user_id"],
-            "linkedin_post_text": request.linkedin_post_text,
-            "linkedin_post_url": request.linkedin_post_url,
+        "linkedin_post_text": request.linkedin_post_text,
+        "linkedin_post_url": request.linkedin_post_url,
         "job_description_text": request.job_description_text or None,
         "no_job_description": request.no_job_description,
         "recipient_to": request.recipient_to,
@@ -480,9 +480,13 @@ def delete_draft(draft_id: UUID, user: CurrentUser, storage: Storage) -> None:
     if not isinstance(outreach, dict):
         raise HTTPException(404, "Draft not found.")
     try:
-        deleted = storage.delete_outreach_item_permanently(user["user_id"], str(outreach["id"]))
+        deleted = storage.delete_outreach_item_permanently(
+            user["user_id"], str(outreach["id"])
+        )
     except httpx.HTTPError as error:
-        raise HTTPException(502, "The task could not be deleted. No records were removed.") from error
+        raise HTTPException(
+            502, "The task could not be deleted. No records were removed."
+        ) from error
     if not deleted:
         raise HTTPException(404, "Draft not found.")
 

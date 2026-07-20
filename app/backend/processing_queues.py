@@ -101,14 +101,34 @@ def _safe_error(error: Exception) -> str:
 
 def _failure_details(error: Exception) -> tuple[str, str, str]:
     if isinstance(error, DuplicateQueueItemError):
-        return ("duplicate", "duplicate", "A draft already exists for this recipient and LinkedIn source.")
+        return (
+            "duplicate",
+            "duplicate",
+            "A draft already exists for this recipient and LinkedIn source.",
+        )
     if isinstance(error, ValidationError) and "recipient_to" in str(error):
-        return ("no_email_available", "no_email_available", "No usable recipient email is available.")
+        return (
+            "no_email_available",
+            "no_email_available",
+            "No usable recipient email is available.",
+        )
     if isinstance(error, ProviderUnavailableError):
-        return ("failed", "generation_unavailable", "Email generation is temporarily unavailable. Try again.")
+        return (
+            "failed",
+            "generation_unavailable",
+            "Email generation is temporarily unavailable. Try again.",
+        )
     if isinstance(error, ValueError) and str(error) == "resume":
-        return ("failed", "resume_unavailable", "The selected resume is unavailable or not ready.")
-    return ("failed", _safe_error(error), "This task could not be processed. Try again.")
+        return (
+            "failed",
+            "resume_unavailable",
+            "The selected resume is unavailable or not ready.",
+        )
+    return (
+        "failed",
+        _safe_error(error),
+        "This task could not be processed. Try again.",
+    )
 
 
 @router.post("", response_model=QueueResponse, status_code=status.HTTP_201_CREATED)
@@ -147,23 +167,57 @@ def get_queue(queue_id: UUID, user: CurrentUser, storage: Storage) -> QueueRespo
 def remove_item(
     queue_id: UUID, item_id: UUID, user: CurrentUser, storage: Storage
 ) -> None:
-    logger.info("queue_task_delete_requested user_id=%s queue_id=%s item_id=%s", user["user_id"], queue_id, item_id)
+    logger.info(
+        "queue_task_delete_requested user_id=%s queue_id=%s item_id=%s",
+        user["user_id"],
+        queue_id,
+        item_id,
+    )
     try:
-        deleted = storage.delete_processing_queue_task_permanently(user["user_id"], str(item_id))
+        deleted = storage.delete_processing_queue_task_permanently(
+            user["user_id"], str(item_id)
+        )
     except httpx.HTTPError as error:
-        logger.exception("queue_task_delete_failed user_id=%s queue_id=%s item_id=%s", user["user_id"], queue_id, item_id)
-        raise HTTPException(502, "The task could not be deleted. No records were removed.") from error
+        logger.exception(
+            "queue_task_delete_failed user_id=%s queue_id=%s item_id=%s",
+            user["user_id"],
+            queue_id,
+            item_id,
+        )
+        raise HTTPException(
+            502, "The task could not be deleted. No records were removed."
+        ) from error
     if deleted is None:
         # Do not reveal whether the task exists for another account.
         raise HTTPException(404, "Processing queue item not found.")
-    logger.info("queue_task_delete_succeeded user_id=%s queue_id=%s item_id=%s status_before=%s outreach_item_id=%s", user["user_id"], deleted.get("queue_id"), item_id, deleted.get("task_status"), deleted.get("outreach_item_id"))
+    logger.info(
+        "queue_task_delete_succeeded user_id=%s queue_id=%s item_id=%s status_before=%s outreach_item_id=%s",
+        user["user_id"],
+        deleted.get("queue_id"),
+        item_id,
+        deleted.get("task_status"),
+        deleted.get("outreach_item_id"),
+    )
 
 
 @router.patch("/{queue_id}/items/{item_id}", response_model=QueueItemResponse)
-def update_item(queue_id: UUID, item_id: UUID, request: QueueItemUpdateRequest, user: CurrentUser, storage: Storage) -> QueueItemResponse:
-    record = storage.update_processing_queue_item(str(queue_id), str(item_id), user["user_id"], request.model_dump(exclude_unset=True))
+def update_item(
+    queue_id: UUID,
+    item_id: UUID,
+    request: QueueItemUpdateRequest,
+    user: CurrentUser,
+    storage: Storage,
+) -> QueueItemResponse:
+    record = storage.update_processing_queue_item(
+        str(queue_id),
+        str(item_id),
+        user["user_id"],
+        request.model_dump(exclude_unset=True),
+    )
     if record is None:
-        raise HTTPException(409, "Only non-processing items in a draft or paused queue can be edited.")
+        raise HTTPException(
+            409, "Only non-processing items in a draft or paused queue can be edited."
+        )
     return QueueItemResponse.model_validate(record)
 
 
@@ -235,7 +289,10 @@ def process_queue(
 
 
 def process_queue_item(
-    item: dict[str, Any], user_id: str, storage: SupabaseAdmin, generator: EmailGenerator
+    item: dict[str, Any],
+    user_id: str,
+    storage: SupabaseAdmin,
+    generator: EmailGenerator,
 ) -> None:
     """Process a claimed queue item; shared by normal processing and one-task retry."""
     try:
@@ -251,33 +308,41 @@ def process_queue_item(
             user_id, payload.recipient_to, payload.linkedin_post_url
         ):
             raise DuplicateQueueItemError()
-        generated = generator.generate(build_generation_prompt(resume["extracted_text"], payload))
+        generated = generator.generate(
+            build_generation_prompt(resume["extracted_text"], payload)
+        )
         draft_request = DraftCreateRequest(
             **payload.model_dump(), subject=generated.subject, body=generated.body
         )
         outreach = {
-                "user_id": user_id,
-                "linkedin_post_text": draft_request.linkedin_post_text,
-                "linkedin_post_url": draft_request.linkedin_post_url,
-                "job_description_text": draft_request.job_description_text or None,
-                "no_job_description": draft_request.no_job_description,
-                "recipient_to": draft_request.recipient_to,
-                "recipient_cc": draft_request.recipient_cc,
-                "recipient_name": draft_request.recipient_name,
-                "company_name": draft_request.company_name,
-                "selected_resume_id": str(draft_request.resume_id),
-                "status": "ready",
+            "user_id": user_id,
+            "linkedin_post_text": draft_request.linkedin_post_text,
+            "linkedin_post_url": draft_request.linkedin_post_url,
+            "job_description_text": draft_request.job_description_text or None,
+            "no_job_description": draft_request.no_job_description,
+            "recipient_to": draft_request.recipient_to,
+            "recipient_cc": draft_request.recipient_cc,
+            "recipient_name": draft_request.recipient_name,
+            "company_name": draft_request.company_name,
+            "selected_resume_id": str(draft_request.resume_id),
+            "status": "ready",
         }
         draft = {
-                "user_id": user_id,
-                "subject": generated.subject,
-                "body": generated.body,
-                "generation_status": "completed",
-                "draft_status": "ready_for_review",
+            "user_id": user_id,
+            "subject": generated.subject,
+            "body": generated.body,
+            "generation_status": "completed",
+            "draft_status": "ready_for_review",
         }
         saved = storage.create_draft(outreach, draft)
         storage.complete_processing_queue_item(item["id"], user_id, saved["id"])
     except Exception as error:
         failure_status, error_code, reason = _failure_details(error)
-        logger.warning("processing queue item failed item_id=%s code=%s", item.get("id"), error_code)
-        storage.fail_processing_queue_item(item["id"], user_id, error_code, failure_status, reason)
+        logger.warning(
+            "processing queue item failed item_id=%s code=%s",
+            item.get("id"),
+            error_code,
+        )
+        storage.fail_processing_queue_item(
+            item["id"], user_id, error_code, failure_status, reason
+        )
