@@ -18,6 +18,14 @@ class GmailPersistenceError(Exception):
     """A safe, token-free error returned by Gmail persistence operations."""
 
 
+class ExtensionQueueAppendError(Exception):
+    """A safe PostgREST error for a failed extension queue append."""
+
+
+class ExtensionOrphanRepairError(Exception):
+    """A safe PostgREST error for an orphan-repair RPC rejection."""
+
+
 _SAFE_GMAIL_INVALIDATION_CODES = frozenset(
     {"access_denied", "authorization_required", "invalid_grant", "token_expired"}
 )
@@ -408,6 +416,123 @@ class SupabaseAdmin:
         item_response.raise_for_status()
         return self._queue(queue["id"], user_id) or queue
 
+    def find_extension_duplicate(self, user_id: str, linkedin_post_url: str) -> dict[str, Any] | None:
+        response = httpx.get(
+            f"{self._project_url}/rest/v1/processing_queue_items",
+            params={"select": "id,queue_id,outreach_item_id,status,failure_status,hidden_at", "user_id": f"eq.{user_id}", "source_linkedin_post_url": f"eq.{linkedin_post_url}", "status": "neq.failed", "failure_status": "is.null", "hidden_at": "is.null", "limit": "1"},
+            headers=self._headers, timeout=30.0,
+        )
+        response.raise_for_status()
+        rows = response.json()
+        if isinstance(rows, list) and rows and isinstance(rows[0], dict):
+            item = rows[0]
+            queue = self.get_processing_queue(str(item["queue_id"]), user_id)
+            queue_status = queue.get("status") if queue else None
+            item["record_type"] = "failed_task" if item.get("status") == "failed" or item.get("failure_status") else "processing_queue_item"
+            item["location"] = "Failed Tasks" if item["record_type"] == "failed_task" else ("Already completed" if queue_status in {"completed", "completed_with_failures"} else "Already in Processing Queue")
+            item["queue_status"] = queue_status
+            item["open_path"] = "/failed-tasks" if item["record_type"] == "failed_task" else f"/processing-queue?queueId={item['queue_id']}"
+            return item
+
+        # A captured outreach without a queue item is an interrupted import, not
+        # a visible duplicate.  Generation history makes it a real review/sent
+        # duplicate; otherwise callers repair it through the RPC below.
+        outreach = httpx.get(
+            f"{self._project_url}/rest/v1/outreach_items",
+            params={"select": "id,status", "user_id": f"eq.{user_id}", "linkedin_post_url": f"eq.{linkedin_post_url}", "limit": "1"},
+            headers=self._headers, timeout=30.0,
+        )
+        outreach.raise_for_status()
+        outreach_rows = outreach.json()
+        if not isinstance(outreach_rows, list) or not outreach_rows or not isinstance(outreach_rows[0], dict):
+            return None
+        record = outreach_rows[0]
+        drafts = httpx.get(
+            f"{self._project_url}/rest/v1/generated_drafts",
+            params={"select": "id,draft_status", "user_id": f"eq.{user_id}", "outreach_item_id": f"eq.{record['id']}", "limit": "1"},
+            headers=self._headers, timeout=30.0,
+        )
+        drafts.raise_for_status()
+        draft_rows = drafts.json()
+        if isinstance(draft_rows, list) and draft_rows and isinstance(draft_rows[0], dict):
+            draft = draft_rows[0]
+            location = "Already completed" if draft.get("draft_status") == "sent" else "Already in Review Queue"
+            return {"id": draft["id"], "outreach_item_id": record["id"], "record_type": "review_item", "location": location, "open_path": "/review-queue"}
+        return {"id": record["id"], "outreach_item_id": record["id"], "record_type": "orphaned_outreach", "location": "orphaned outreach"}
+
+    def repair_extension_orphan(self, user_id: str, outreach_item_id: str, metadata: dict[str, object]) -> dict[str, Any] | None:
+        payload = {"p_user_id": user_id, "p_outreach_item_id": outreach_item_id, "p_metadata": self._extension_queue_metadata(metadata)}
+        response = httpx.post(
+            f"{self._project_url}/rest/v1/rpc/repair_extension_orphaned_outreach",
+            json=payload, headers=self._headers, timeout=30.0,
+        )
+        if response.is_error:
+            try:
+                body = response.json()
+            except ValueError:
+                body = response.text
+            detail = body.get("message", body) if isinstance(body, dict) else body
+            raise ExtensionOrphanRepairError(f"repair extension orphan rejected ({response.status_code}): {str(detail)[:500]}")
+        rows = response.json()
+        if isinstance(rows, dict):
+            return rows if rows.get("queue_id") and rows.get("queue_item_id") else None
+        if not isinstance(rows, list) or not rows or not isinstance(rows[0], dict):
+            return None
+        row = rows[0]
+        return row if row.get("queue_id") and row.get("queue_item_id") else None
+
+    @staticmethod
+    def _extension_queue_metadata(metadata: dict[str, object]) -> dict[str, object | None]:
+        """Keep the JSONB RPC contract small and make nullable text explicit."""
+        nullable = {
+            "author_profile_url", "job_description_url", "job_description_text",
+        }
+        allowed = {
+            "linkedin_post_url", "author_name", "author_profile_url", "linkedin_post_text",
+            "job_description_url", "job_description_text", "job_description_source",
+            "capture_source", "captured_at", "idempotency_key",
+        }
+        payload: dict[str, object | None] = {}
+        for key in allowed:
+            value = metadata.get(key)
+            payload[key] = None if key in nullable and isinstance(value, str) and not value.strip() else value
+        return payload
+
+    @staticmethod
+    def _extension_append_error(response: httpx.Response) -> ExtensionQueueAppendError:
+        try:
+            body = response.json()
+        except ValueError:
+            body = response.text
+        if isinstance(body, dict):
+            detail = body.get("message") or body.get("details") or body.get("hint") or "Supabase rejected the queue append."
+        else:
+            detail = str(body) or "Supabase rejected the queue append."
+        return ExtensionQueueAppendError(f"Processing Queue append was rejected ({response.status_code}): {str(detail)[:500]}")
+
+    def append_extension_processing_queue_item(self, user_id: str, metadata: dict[str, object]) -> dict[str, Any]:
+        response = httpx.post(
+            f"{self._project_url}/rest/v1/rpc/append_extension_processing_queue_item",
+            json={"p_user_id": user_id, "p_metadata": self._extension_queue_metadata(metadata)}, headers=self._headers, timeout=30.0,
+        )
+        if response.is_error:
+            raise self._extension_append_error(response)
+        rows = response.json()
+        if not isinstance(rows, list) or not rows or not isinstance(rows[0], dict):
+            raise ValueError("Supabase did not return the imported queue item.")
+        return rows[0]
+
+    def create_extension_failed_task(self, user_id: str, metadata: dict[str, object], reason: str, stage: str) -> dict[str, Any]:
+        response = httpx.post(
+            f"{self._project_url}/rest/v1/rpc/create_extension_failed_task",
+            json={"p_user_id": user_id, "p_metadata": metadata, "p_reason": reason, "p_stage": stage}, headers=self._headers, timeout=30.0,
+        )
+        response.raise_for_status()
+        rows = response.json()
+        if not isinstance(rows, list) or not rows or not isinstance(rows[0], dict):
+            raise ValueError("Supabase did not return the failed import.")
+        return rows[0]
+
     def get_processing_queue(
         self, queue_id: str, user_id: str
     ) -> dict[str, Any] | None:
@@ -449,7 +574,7 @@ class SupabaseAdmin:
         self, queue_id: str, item_id: str, user_id: str
     ) -> bool:
         queue = self._queue(queue_id, user_id)
-        if queue is None or queue.get("status") != "draft":
+        if queue is None or queue.get("status") not in {"draft", "paused"}:
             return False
         response = httpx.delete(
             f"{self._project_url}/rest/v1/processing_queue_items",
@@ -457,7 +582,7 @@ class SupabaseAdmin:
                 "id": f"eq.{item_id}",
                 "queue_id": f"eq.{queue_id}",
                 "user_id": f"eq.{user_id}",
-                "status": "eq.pending",
+                "status": "in.(pending,failed)",
             },
             headers={**self._headers, "Prefer": "return=representation"},
             timeout=30.0,
@@ -471,13 +596,50 @@ class SupabaseAdmin:
             params={
                 "id": f"eq.{queue_id}",
                 "user_id": f"eq.{user_id}",
-                "status": "eq.draft",
+                "status": f"eq.{queue['status']}",
             },
             json={"total_items": max(0, int(queue["total_items"]) - 1)},
             headers=self._headers,
             timeout=30.0,
         ).raise_for_status()
         return True
+
+    def delete_outreach_item_permanently(self, user_id: str, outreach_item_id: str) -> bool:
+        response = httpx.post(
+            f"{self._project_url}/rest/v1/rpc/delete_outreach_item_permanently",
+            json={"p_user_id": user_id, "p_outreach_item_id": outreach_item_id},
+            headers=self._headers, timeout=30.0,
+        )
+        response.raise_for_status()
+        return response.json() is True
+
+    def delete_processing_queue_task_permanently(self, user_id: str, item_id: str) -> dict[str, Any] | None:
+        response = httpx.post(
+            f"{self._project_url}/rest/v1/rpc/delete_processing_queue_task_permanently",
+            json={"p_user_id": user_id, "p_queue_item_id": item_id},
+            headers=self._headers, timeout=30.0,
+        )
+        response.raise_for_status()
+        rows = response.json()
+        return rows[0] if isinstance(rows, list) and rows and isinstance(rows[0], dict) else None
+
+    def update_processing_queue_item(self, queue_id: str, item_id: str, user_id: str, update: dict[str, object]) -> dict[str, Any] | None:
+        queue = self._queue(queue_id, user_id)
+        if queue is None or queue.get("status") not in {"draft", "paused"}:
+            return None
+        allowed = {"linkedin_post_url", "author_name", "author_profile_url", "linkedin_post_text", "job_description_url", "job_description_text", "recipient_to", "recipient_cc"}
+        if not set(update).issubset(allowed):
+            return None
+        source = {
+            "source_linkedin_post_url": update.get("linkedin_post_url"), "source_author_name": update.get("author_name"),
+            "source_author_profile_url": update.get("author_profile_url"), "source_linkedin_post_text": update.get("linkedin_post_text"),
+            "source_job_description_url": update.get("job_description_url"), "source_job_description_text": update.get("job_description_text"),
+        }
+        source = {key: value for key, value in source.items() if value is not None}
+        response = httpx.patch(f"{self._project_url}/rest/v1/processing_queue_items", params={"id": f"eq.{item_id}", "queue_id": f"eq.{queue_id}", "user_id": f"eq.{user_id}", "status": "in.(pending,failed)"}, json=source, headers={**self._headers, "Prefer": "return=representation"}, timeout=30.0)
+        response.raise_for_status()
+        rows = response.json()
+        return rows[0] if isinstance(rows, list) and rows and isinstance(rows[0], dict) else None
 
     def start_processing_queue(
         self, queue_id: str, user_id: str, allowed: tuple[str, ...]
@@ -604,8 +766,11 @@ class SupabaseAdmin:
     def list_failed_tasks(self, user_id: str) -> list[dict[str, Any]]:
         response = httpx.get(
             f"{self._project_url}/rest/v1/processing_queue_items",
-            params={"select": "*", "user_id": f"eq.{user_id}", "status": "in.(failed,processing)",
-                    "failure_status": "not.is.null", "hidden_at": "is.null", "order": "updated_at.desc"},
+            # Extension failure records from older deployments can be `failed`
+            # before `failure_status` was populated.  Never hide them solely
+            # because that optional classification is absent.
+            params={"select": "*", "user_id": f"eq.{user_id}", "or": "(status.eq.failed,failure_status.not.is.null)",
+                    "hidden_at": "is.null", "order": "updated_at.desc"},
             headers=self._headers, timeout=30.0,
         )
         response.raise_for_status()

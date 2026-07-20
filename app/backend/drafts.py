@@ -111,6 +111,7 @@ class DraftUpdateRequest(BaseModel):
 
 class DraftResponse(BaseModel):
     id: UUID
+    outreach_item_id: UUID
     resume_id: UUID | None
     linkedin_post_text: str
     job_description_text: str
@@ -180,6 +181,7 @@ def _response(record: dict[str, Any]) -> DraftResponse:
     return DraftResponse.model_validate(
         {
             "id": record["id"],
+            "outreach_item_id": outreach["id"],
             "resume_id": outreach.get("selected_resume_id"),
             "linkedin_post_text": outreach.get("linkedin_post_text") or "",
             "job_description_text": outreach.get("job_description_text") or "",
@@ -473,10 +475,15 @@ def reject_draft(draft_id: UUID, user: CurrentUser, storage: Storage) -> None:
 
 @router.delete("/{draft_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_draft(draft_id: UUID, user: CurrentUser, storage: Storage) -> None:
-    record = storage.update_draft(
-        str(draft_id), user["user_id"], {"draft_status": "deleted"}
-    )
-    if record is None:
+    record = storage.get_draft(str(draft_id), user["user_id"])
+    outreach = record.get("outreach_items") if record else None
+    if not isinstance(outreach, dict):
+        raise HTTPException(404, "Draft not found.")
+    try:
+        deleted = storage.delete_outreach_item_permanently(user["user_id"], str(outreach["id"]))
+    except httpx.HTTPError as error:
+        raise HTTPException(502, "The task could not be deleted. No records were removed.") from error
+    if not deleted:
         raise HTTPException(404, "Draft not found.")
 
 

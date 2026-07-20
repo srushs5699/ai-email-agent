@@ -7,8 +7,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from auth import AuthenticatedUser, get_current_user
 from drafts import router as drafts_router
 from email_generation import router as email_generation_router
+from extension_import import router as extension_import_router
 from failed_tasks import router as failed_tasks_router
 from gmail import router as gmail_router
+from outreach_items import router as outreach_items_router
 from processing_queues import router as processing_queues_router
 from resumes import router as resumes_router
 
@@ -30,8 +32,10 @@ app.add_middleware(
 
 app.include_router(resumes_router)
 app.include_router(email_generation_router)
+app.include_router(extension_import_router)
 app.include_router(drafts_router)
 app.include_router(gmail_router)
+app.include_router(outreach_items_router)
 app.include_router(processing_queues_router)
 app.include_router(failed_tasks_router)
 

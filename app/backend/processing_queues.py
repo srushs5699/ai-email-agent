@@ -49,6 +49,24 @@ class QueueItemResponse(BaseModel):
     error_code: str | None = None
     created_at: str
     updated_at: str
+    outreach_item_id: UUID | None = None
+    source_linkedin_post_url: str | None = None
+    source_author_name: str | None = None
+    source_author_profile_url: str | None = None
+    source_linkedin_post_text: str | None = None
+    source_job_description_url: str | None = None
+    source_job_description_text: str | None = None
+
+
+class QueueItemUpdateRequest(BaseModel):
+    linkedin_post_url: str | None = Field(default=None, max_length=2048)
+    author_name: str | None = Field(default=None, max_length=300)
+    author_profile_url: str | None = Field(default=None, max_length=2048)
+    linkedin_post_text: str | None = Field(default=None, max_length=12000)
+    job_description_url: str | None = Field(default=None, max_length=2048)
+    job_description_text: str | None = Field(default=None, max_length=50000)
+    recipient_to: str | None = Field(default=None, max_length=320)
+    recipient_cc: str | None = Field(default=None, max_length=320)
 
 
 class QueueResponse(BaseModel):
@@ -129,10 +147,24 @@ def get_queue(queue_id: UUID, user: CurrentUser, storage: Storage) -> QueueRespo
 def remove_item(
     queue_id: UUID, item_id: UUID, user: CurrentUser, storage: Storage
 ) -> None:
-    if not storage.remove_processing_queue_item(
-        str(queue_id), str(item_id), user["user_id"]
-    ):
-        raise HTTPException(409, "Items can only be removed from a draft queue.")
+    logger.info("queue_task_delete_requested user_id=%s queue_id=%s item_id=%s", user["user_id"], queue_id, item_id)
+    try:
+        deleted = storage.delete_processing_queue_task_permanently(user["user_id"], str(item_id))
+    except httpx.HTTPError as error:
+        logger.exception("queue_task_delete_failed user_id=%s queue_id=%s item_id=%s", user["user_id"], queue_id, item_id)
+        raise HTTPException(502, "The task could not be deleted. No records were removed.") from error
+    if deleted is None:
+        # Do not reveal whether the task exists for another account.
+        raise HTTPException(404, "Processing queue item not found.")
+    logger.info("queue_task_delete_succeeded user_id=%s queue_id=%s item_id=%s status_before=%s outreach_item_id=%s", user["user_id"], deleted.get("queue_id"), item_id, deleted.get("task_status"), deleted.get("outreach_item_id"))
+
+
+@router.patch("/{queue_id}/items/{item_id}", response_model=QueueItemResponse)
+def update_item(queue_id: UUID, item_id: UUID, request: QueueItemUpdateRequest, user: CurrentUser, storage: Storage) -> QueueItemResponse:
+    record = storage.update_processing_queue_item(str(queue_id), str(item_id), user["user_id"], request.model_dump(exclude_unset=True))
+    if record is None:
+        raise HTTPException(409, "Only non-processing items in a draft or paused queue can be edited.")
+    return QueueItemResponse.model_validate(record)
 
 
 def _launch(

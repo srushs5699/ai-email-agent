@@ -1,8 +1,10 @@
 """Step 8 failed processing work: list, retry one, or hide one safely."""
 
+import logging
 from typing import Annotated, Any
 from uuid import UUID
 
+import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from pydantic import BaseModel
 
@@ -15,6 +17,7 @@ router = APIRouter(prefix="/api/v1/failed-tasks", tags=["failed tasks"])
 CurrentUser = Annotated[AuthenticatedUser, Depends(get_current_user)]
 Storage = Annotated[SupabaseAdmin, Depends(get_supabase_admin)]
 Generator = Annotated[EmailGenerator, Depends(get_email_generator)]
+logger = logging.getLogger(__name__)
 
 
 class FailedTaskResponse(BaseModel):
@@ -25,6 +28,12 @@ class FailedTaskResponse(BaseModel):
     generated_draft_id: UUID | None = None
     resume_id: UUID | None = None
     linkedin_post_url: str | None = None
+    job_description_url: str | None = None
+    author_name: str | None = None
+    author_profile_url: str | None = None
+    linkedin_post_text: str | None = None
+    captured_at: str | None = None
+    failure_stage: str | None = None
     status: str
     failure_reason: str
     retry_count: int
@@ -46,7 +55,13 @@ def _response(record: dict[str, Any]) -> FailedTaskResponse:
         outreach_item_id=record.get("outreach_item_id"),
         generated_draft_id=record.get("generated_draft_id"),
         resume_id=payload.get("resume_id"),
-        linkedin_post_url=payload.get("linkedin_post_url"),
+        linkedin_post_url=payload.get("linkedin_post_url") or record.get("source_linkedin_post_url"),
+        job_description_url=payload.get("job_description_url") or record.get("source_job_description_url"),
+        author_name=payload.get("author_name") or record.get("source_author_name"),
+        author_profile_url=payload.get("author_profile_url") or record.get("source_author_profile_url"),
+        linkedin_post_text=payload.get("linkedin_post_text") or record.get("source_linkedin_post_text"),
+        captured_at=payload.get("captured_at") or record.get("captured_at"),
+        failure_stage=record.get("failure_stage"),
         status=record.get("failure_status") or "failed",
         failure_reason=(
             record.get("failure_reason") or "This task could not be processed."
@@ -94,11 +109,12 @@ def retry_failed_task(
 
 @router.delete("/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_failed_task(task_id: UUID, user: CurrentUser, storage: Storage) -> None:
-    if storage.hide_failed_task(str(task_id), user["user_id"]):
-        return
-    existing = storage.get_failed_task(str(task_id), user["user_id"])
-    if existing is None:
+    logger.info("failed_task_delete_requested user_id=%s item_id=%s", user["user_id"], task_id)
+    try:
+        deleted = storage.delete_processing_queue_task_permanently(user["user_id"], str(task_id))
+    except httpx.HTTPError as error:
+        logger.exception("failed_task_delete_failed user_id=%s item_id=%s", user["user_id"], task_id)
+        raise HTTPException(502, "The task could not be deleted. No records were removed.") from error
+    if deleted is None:
         raise HTTPException(404, "Failed task not found.")
-    if existing.get("status") == "processing":
-        raise HTTPException(409, "A retry is currently in progress.")
-    raise HTTPException(409, "This failed task has already been removed.")
+    logger.info("failed_task_delete_succeeded user_id=%s item_id=%s queue_id=%s status_before=%s outreach_item_id=%s", user["user_id"], task_id, deleted.get("queue_id"), deleted.get("task_status"), deleted.get("outreach_item_id"))
