@@ -1,4 +1,5 @@
 """Permanent, owned deletion of a workflow item and its dependent data."""
+
 import logging
 from typing import Annotated
 from uuid import UUID
@@ -22,15 +23,34 @@ class DeleteOutreachItemResponse(BaseModel):
 
 
 @router.delete("/{outreach_item_id}", response_model=DeleteOutreachItemResponse)
-def delete_outreach_item(outreach_item_id: UUID, user: CurrentUser, storage: Storage) -> DeleteOutreachItemResponse:
-    logger.info("outreach_delete_requested user_id=%s outreach_item_id=%s", user["user_id"], outreach_item_id)
+def delete_outreach_item(
+    outreach_item_id: UUID, user: CurrentUser, storage: Storage
+) -> DeleteOutreachItemResponse:
+    logger.info(
+        "outreach_delete_requested user_id=%s outreach_item_id=%s",
+        user["user_id"],
+        outreach_item_id,
+    )
     try:
-        if not storage.delete_outreach_item_permanently(user["user_id"], str(outreach_item_id)):
+        if not storage.delete_outreach_item_permanently(
+            user["user_id"], str(outreach_item_id)
+        ):
             raise HTTPException(404, "Outreach item not found.")
     except HTTPException:
         raise
     except httpx.HTTPError as error:
-        logger.exception("outreach_delete_failed user_id=%s outreach_item_id=%s", user["user_id"], outreach_item_id)
-        raise HTTPException(502, "The task could not be deleted. No records were removed.") from error
-    logger.info("outreach_delete_succeeded user_id=%s outreach_item_id=%s related_records=transactional", user["user_id"], outreach_item_id)
+        logger.exception(
+            "outreach_delete_failed user_id=%s outreach_item_id=%s",
+            user["user_id"],
+            outreach_item_id,
+        )
+        raise HTTPException(
+            502, "The task could not be deleted. No records were removed."
+        ) from error
+    logger.info(
+        "outreach_delete_succeeded user_id=%s outreach_item_id=%s "
+        "related_records=transactional",
+        user["user_id"],
+        outreach_item_id,
+    )
     return DeleteOutreachItemResponse(deleted=True, outreach_item_id=outreach_item_id)

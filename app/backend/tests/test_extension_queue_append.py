@@ -5,7 +5,11 @@ import re
 import httpx
 import pytest
 
-from supabase_admin import ExtensionOrphanRepairError, ExtensionQueueAppendError, SupabaseAdmin
+from supabase_admin import (
+    ExtensionOrphanRepairError,
+    ExtensionQueueAppendError,
+    SupabaseAdmin,
+)
 
 
 class Response:
@@ -57,8 +61,13 @@ def test_append_rejects_malformed_success_response(monkeypatch: pytest.MonkeyPat
 
 def test_orphan_repair_uses_uuid_jsonb_parameters_and_normalizes_list_response(monkeypatch: pytest.MonkeyPatch) -> None:
     received: dict[str, object] = {}
+
     def post(_url: str, **kwargs: object) -> Response:
-        received.update(kwargs); return Response(200, [{"queue_id": "queue", "queue_item_id": "item"}])
+        received.update(kwargs)
+        return Response(
+            200,
+            [{"queue_id": "queue", "queue_item_id": "item"}],
+        )
     monkeypatch.setattr(httpx, "post", post)
     result = SupabaseAdmin("https://example.supabase.co", "service-role").repair_extension_orphan("00000000-0000-0000-0000-000000000001", "00000000-0000-0000-0000-000000000002", {"author_profile_url": ""})
     assert result == {"queue_id": "queue", "queue_item_id": "item"}

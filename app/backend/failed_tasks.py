@@ -55,11 +55,15 @@ def _response(record: dict[str, Any]) -> FailedTaskResponse:
         outreach_item_id=record.get("outreach_item_id"),
         generated_draft_id=record.get("generated_draft_id"),
         resume_id=payload.get("resume_id"),
-        linkedin_post_url=payload.get("linkedin_post_url") or record.get("source_linkedin_post_url"),
-        job_description_url=payload.get("job_description_url") or record.get("source_job_description_url"),
+        linkedin_post_url=payload.get("linkedin_post_url")
+        or record.get("source_linkedin_post_url"),
+        job_description_url=payload.get("job_description_url")
+        or record.get("source_job_description_url"),
         author_name=payload.get("author_name") or record.get("source_author_name"),
-        author_profile_url=payload.get("author_profile_url") or record.get("source_author_profile_url"),
-        linkedin_post_text=payload.get("linkedin_post_text") or record.get("source_linkedin_post_text"),
+        author_profile_url=payload.get("author_profile_url")
+        or record.get("source_author_profile_url"),
+        linkedin_post_text=payload.get("linkedin_post_text")
+        or record.get("source_linkedin_post_text"),
         captured_at=payload.get("captured_at") or record.get("captured_at"),
         failure_stage=record.get("failure_stage"),
         status=record.get("failure_status") or "failed",
@@ -109,12 +113,28 @@ def retry_failed_task(
 
 @router.delete("/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_failed_task(task_id: UUID, user: CurrentUser, storage: Storage) -> None:
-    logger.info("failed_task_delete_requested user_id=%s item_id=%s", user["user_id"], task_id)
+    logger.info(
+        "failed_task_delete_requested user_id=%s item_id=%s", user["user_id"], task_id
+    )
     try:
-        deleted = storage.delete_processing_queue_task_permanently(user["user_id"], str(task_id))
+        deleted = storage.delete_processing_queue_task_permanently(
+            user["user_id"], str(task_id)
+        )
     except httpx.HTTPError as error:
-        logger.exception("failed_task_delete_failed user_id=%s item_id=%s", user["user_id"], task_id)
-        raise HTTPException(502, "The task could not be deleted. No records were removed.") from error
+        logger.exception(
+            "failed_task_delete_failed user_id=%s item_id=%s", user["user_id"], task_id
+        )
+        raise HTTPException(
+            502, "The task could not be deleted. No records were removed."
+        ) from error
     if deleted is None:
         raise HTTPException(404, "Failed task not found.")
-    logger.info("failed_task_delete_succeeded user_id=%s item_id=%s queue_id=%s status_before=%s outreach_item_id=%s", user["user_id"], task_id, deleted.get("queue_id"), deleted.get("task_status"), deleted.get("outreach_item_id"))
+    logger.info(
+        "failed_task_delete_succeeded user_id=%s item_id=%s queue_id=%s "
+        "status_before=%s outreach_item_id=%s",
+        user["user_id"],
+        task_id,
+        deleted.get("queue_id"),
+        deleted.get("task_status"),
+        deleted.get("outreach_item_id"),
+    )
