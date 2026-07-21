@@ -62,9 +62,9 @@ Storage = Annotated[ExtensionImportStorage, Depends(get_supabase_admin)]
 class ImportRequest(BaseModel):
     version: Literal[1]
     linkedin_post_url: str = Field(max_length=2048)
-    author_name: str = Field(max_length=300)
+    author_name: str | None = Field(default=None, max_length=300)
     author_profile_url: str | None = Field(default=None, max_length=2048)
-    linkedin_post_text: str = Field(max_length=12000)
+    linkedin_post_text: str | None = Field(default=None, max_length=12000)
     job_description_url: str | None = Field(default=None, max_length=2048)
     job_description_text: str | None = Field(default=None, max_length=50000)
     job_description_source: Literal["visible_page", "manual", "unavailable"] = (
@@ -299,14 +299,6 @@ def import_capture(
         return ImportResult(outcome="validation_required", reason=error.reason)
     reviewed_text = request.job_description_text
     metadata = _metadata(request, source_url, text=reviewed_text)
-    if not request.author_name:
-        return ImportResult(
-            outcome="validation_required", reason="Author name is required"
-        )
-    if len(request.linkedin_post_text) < 3:
-        return ImportResult(
-            outcome="validation_required", reason="LinkedIn post text is required"
-        )
     logger.info(
         "extension_import_lookup user_id=%s linkedin_url=%s",
         user["user_id"],

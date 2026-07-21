@@ -2,7 +2,7 @@ import { requestProtectedApi } from './client'
 
 export interface EmailGenerationInput {
   resume_id: string
-  linkedin_post_url?: string
+  linkedin_post_url: string
   linkedin_post_text: string
   job_description_text: string
   no_job_description: boolean

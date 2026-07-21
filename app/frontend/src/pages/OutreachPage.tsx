@@ -10,14 +10,27 @@ import {
 } from '../api/emailGeneration'
 import { listResumes, type ResumeMetadata } from '../api/resumes'
 import { getSelectedResumeId, setSelectedResumeId } from '../lib/selectedResume'
+import { parseLinkedInImport } from '../lib/linkedinImport'
 import './OutreachPage.css'
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
-interface OutreachForm extends EmailGenerationInput {
+function sourceUrlError(value: string): string | null {
+  const normalized = value.trim()
+  if (!normalized) return 'LinkedIn Post URL / JD URL is required.'
+  try {
+    const url = new URL(normalized)
+    if (!['http:', 'https:'].includes(url.protocol)) return 'Only HTTP and HTTPS URLs are allowed.'
+  } catch { return 'Enter a valid HTTP or HTTPS LinkedIn post, job, or JD URL.' }
+  return null
+}
+
+interface OutreachForm extends Omit<EmailGenerationInput, 'linkedin_post_url'> {
   recipient_cc: string
   recipient_name: string
   company_name: string
+  linkedin_source_url: string
+  author_profile_url: string
 }
 
 const initialForm: OutreachForm = {
@@ -29,6 +42,8 @@ const initialForm: OutreachForm = {
   recipient_cc: '',
   recipient_name: '',
   company_name: '',
+  linkedin_source_url: '',
+  author_profile_url: '',
 }
 
 function buildFullEmail(form: OutreachForm, email: GeneratedEmail): string {
@@ -59,6 +74,7 @@ export function OutreachPage() {
   const [sendStatus, setSendStatus] = useState<'not_sent' | 'sending' | 'failed' | 'sent'>('not_sent')
   const [sentAt, setSentAt] = useState<string | null>(null)
   const [sendError, setSendError] = useState('')
+  const [importStatus, setImportStatus] = useState('')
   const syncVersion = useRef(0)
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const saveVersion = useRef(0)
@@ -77,6 +93,32 @@ export function OutreachPage() {
     if (params.has('code') || params.has('state') || params.has('error')) {
       window.history.replaceState({}, '', window.location.pathname)
     }
+  }, [])
+
+  useEffect(() => {
+    function applyImport(rawPayload: unknown): void {
+      const imported = parseLinkedInImport(rawPayload)
+      if (!imported) { setImportStatus('LinkedIn import could not be read safely. You can continue with manual entry.'); return }
+      hasUserInput.current = true
+      setForm((current) => ({
+        ...current,
+        linkedin_source_url: imported.sourceUrl,
+        author_profile_url: imported.authorProfileUrl ?? current.author_profile_url,
+        linkedin_post_text: imported.postText ?? current.linkedin_post_text,
+        job_description_text: imported.jobDescriptionText ?? current.job_description_text,
+        recipient_name: imported.authorName ?? current.recipient_name,
+      }))
+      setImportStatus('LinkedIn details were imported. Review and edit them before generating an email.')
+    }
+    function receive(event: MessageEvent): void {
+      if (event.origin !== window.location.origin || event.source !== window || event.data?.type !== 'AI_EMAIL_AGENT_LINKEDIN_IMPORT') return
+      applyImport(event.data.payload)
+    }
+    window.addEventListener('message', receive)
+    if (new URLSearchParams(window.location.search).get('extensionImport') === '1') {
+      window.postMessage({ type: 'AI_EMAIL_AGENT_REQUEST_LINKEDIN_IMPORT' }, window.location.origin)
+    }
+    return () => window.removeEventListener('message', receive)
   }, [])
 
   useEffect(() => {
@@ -101,6 +143,8 @@ export function OutreachPage() {
             recipient_cc: draft.recipient_cc ?? '',
             recipient_name: draft.recipient_name ?? '',
             company_name: draft.company_name ?? '',
+            linkedin_source_url: '',
+            author_profile_url: '',
           })
           if (hasResume && draft.resume_id) setSelectedResumeId(draft.resume_id)
           setGeneratedEmail({ subject: draft.subject, body: draft.body })
@@ -138,15 +182,12 @@ export function OutreachPage() {
     if (!form.resume_id) {
       return 'Select a resume before generating an email.'
     }
-    if (!form.linkedin_post_text.trim() && !form.job_description_text.trim()) {
-      return 'Add LinkedIn post text or a job description.'
-    }
-    if (!form.job_description_text.trim() && !form.no_job_description) {
-      return 'Select “No job description available” when no job description is provided.'
-    }
+    if (!form.recipient_to.trim()) return 'Recipient email is required.'
     if (!EMAIL_PATTERN.test(form.recipient_to.trim())) {
       return 'Enter a valid recipient email address.'
     }
+    const urlError = sourceUrlError(form.linkedin_source_url)
+    if (urlError) return urlError
     if (form.recipient_cc && !EMAIL_PATTERN.test(form.recipient_cc.trim())) {
       return 'Enter a valid CC email address.'
     }
@@ -165,6 +206,9 @@ export function OutreachPage() {
     try {
       const email = await generateEmail({
         ...form,
+        linkedin_post_url: form.linkedin_source_url.trim(),
+        linkedin_post_text: form.linkedin_post_text.trim(),
+        job_description_text: form.job_description_text.trim(),
         recipient_to: form.recipient_to.trim(),
         recipient_cc: form.recipient_cc.trim() || undefined,
         recipient_name: form.recipient_name.trim() || undefined,
@@ -384,12 +428,19 @@ export function OutreachPage() {
             </div>
 
             <div className="outreach-field">
-              <label htmlFor="linkedin-post">LinkedIn post text</label>
+              <label htmlFor="linkedin-source-url">LinkedIn Post URL / JD URL <span aria-hidden="true">*</span></label>
+              <input aria-describedby="linkedin-source-url-help" id="linkedin-source-url" onChange={(event) => updateForm('linkedin_source_url', event.target.value)} placeholder="Paste a LinkedIn post URL, job URL, or JD URL" type="url" value={form.linkedin_source_url} />
+              <small id="linkedin-source-url-help">Required. This may be a LinkedIn post, LinkedIn job, ATS job, or external job-description URL.</small>
+            </div>
+            <div className="outreach-field">
+              <label htmlFor="linkedin-post">LinkedIn Post Text (Optional)</label>
               <textarea
+                aria-describedby="linkedin-post-help"
                 id="linkedin-post"
                 onChange={(event) => updateForm('linkedin_post_text', event.target.value)}
                 value={form.linkedin_post_text}
               />
+              <small id="linkedin-post-help">Paste the visible post text when available. The task can still be created without it.</small>
             </div>
 
             <div className="outreach-field">
@@ -444,6 +495,10 @@ export function OutreachPage() {
                 />
               </div>
               <div className="outreach-field">
+                <label htmlFor="author-profile-url">Author profile URL (optional)</label>
+                <input id="author-profile-url" onChange={(event) => updateForm('author_profile_url', event.target.value)} type="url" value={form.author_profile_url} />
+              </div>
+              <div className="outreach-field">
                 <label htmlFor="company-name">Company name (optional)</label>
                 <input
                   id="company-name"
@@ -463,6 +518,7 @@ export function OutreachPage() {
               {isGenerating ? 'Generating…' : 'Generate Email'}
             </button>
           </div>
+          {importStatus && <p aria-live="polite">{importStatus}</p>}
           {errorMessage && <p role="alert">{errorMessage}</p>}
         </section>
 

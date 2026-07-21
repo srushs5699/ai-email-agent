@@ -3,6 +3,7 @@ import logging
 import os
 import re
 from typing import Annotated, Any, Protocol
+from urllib.parse import urlsplit
 from uuid import UUID
 
 import httpx
@@ -36,9 +37,11 @@ claim the recipient is hiring unless the supplied text says so.
 Use this body structure and keep the paragraphs short with readable spacing:
 1. Start with "Hello [Recipient Name]," when a recipient name is supplied;
    otherwise use "Hello,".
-2. Open with a specific reference to the supplied LinkedIn post, company,
-   product, role, or job description. Add a light, playful hook only when it
-   fits naturally and is supported by that context.
+2. Open with a specific reference to supplied source content, company, product,
+   role, or job description only when that detail is present. Do not say the
+   sender saw a LinkedIn post unless supplied content confirms it is a post;
+   when context is limited, use a neutral, truthful opening. Add a light,
+   playful hook only when it fits naturally and is supported by that context.
 3. Briefly explain why the opportunity caught Srushti's attention.
 4. Introduce only the resume experience that is useful for this role.
 5. Add a "A few relevant highlights:" section with two or three concise bullet
@@ -60,22 +63,71 @@ LinkedIn: https://www.linkedin.com/in/srushtisanjayshinde/"""
 
 class EmailGenerationRequest(BaseModel):
     resume_id: UUID
-    linkedin_post_url: str | None = None
-    linkedin_post_text: str = ""
-    job_description_text: str = ""
+    linkedin_post_url: str
+    linkedin_post_text: str | None = None
+    job_description_url: str | None = None
+    job_description_text: str | None = None
     no_job_description: bool = False
     recipient_to: str
     recipient_cc: str | None = None
     recipient_name: str | None = None
     company_name: str | None = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_source_url_aliases(cls, value: Any) -> Any:
+        """Keep older clients working while using linkedin_post_url internally."""
+        if not isinstance(value, dict):
+            return value
+        normalized = dict(value)
+        if not normalized.get("linkedin_post_url"):
+            for alias in (
+                "linkedin_url",
+                "post_url",
+                "job_description_url",
+                "source_url",
+            ):
+                if normalized.get(alias):
+                    normalized["linkedin_post_url"] = normalized[alias]
+                    break
+        return normalized
+
     @field_validator("recipient_to")
     @classmethod
     def validate_required_email(cls, value: str) -> str:
         normalized_value = value.strip()
-        if not normalized_value or not EMAIL_PATTERN.fullmatch(normalized_value):
-            raise ValueError("Enter a valid email address.")
+        if not normalized_value:
+            raise ValueError("Recipient email is required.")
+        if not EMAIL_PATTERN.fullmatch(normalized_value):
+            raise ValueError("Enter a valid recipient email address.")
         return normalized_value
+
+    @field_validator("linkedin_post_url")
+    @classmethod
+    def validate_source_url(cls, value: str) -> str:
+        normalized_value = value.strip()
+        if not normalized_value:
+            raise ValueError("LinkedIn Post URL / JD URL is required.")
+        try:
+            parsed = urlsplit(normalized_value)
+        except ValueError as error:
+            raise ValueError(
+                "Enter a valid HTTP or HTTPS LinkedIn post, job, or JD URL."
+            ) from error
+        if parsed.scheme not in {"http", "https"}:
+            raise ValueError("Only HTTP and HTTPS URLs are allowed.")
+        if not parsed.netloc:
+            raise ValueError(
+                "Enter a valid HTTP or HTTPS LinkedIn post, job, or JD URL."
+            )
+        return normalized_value
+
+    @field_validator("linkedin_post_text", "job_description_text", mode="before")
+    @classmethod
+    def normalize_optional_text(cls, value: object) -> str | None:
+        if not isinstance(value, str):
+            return None
+        return value.strip() or None
 
     @field_validator("recipient_cc")
     @classmethod
@@ -86,20 +138,6 @@ class EmailGenerationRequest(BaseModel):
         if not EMAIL_PATTERN.fullmatch(normalized_value):
             raise ValueError("Enter a valid email address.")
         return normalized_value
-
-    @model_validator(mode="after")
-    def validate_inputs(self) -> "EmailGenerationRequest":
-        has_linkedin_text = bool(self.linkedin_post_text.strip())
-        has_job_description = bool(self.job_description_text.strip())
-        if not has_linkedin_text and not has_job_description:
-            raise ValueError("Add LinkedIn post text or a job description.")
-        if not has_job_description and not self.no_job_description:
-            raise ValueError(
-                "Select 'No job description available' when no job description "
-                "is provided."
-            )
-        return self
-
 
 class GeneratedEmail(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
@@ -138,16 +176,18 @@ class EmailGenerator(Protocol):
 
 
 def build_generation_prompt(resume_text: str, request: EmailGenerationRequest) -> str:
-    return json.dumps(
-        {
-            "resume_text": resume_text,
-            "linkedin_post_text": request.linkedin_post_text,
-            "job_description_text": request.job_description_text,
-            "no_job_description": request.no_job_description,
-            "recipient_name": request.recipient_name,
-            "company_name": request.company_name,
-        }
-    )
+    context: dict[str, object] = {
+        "resume_text": resume_text,
+        "source_url": request.linkedin_post_url,
+        "no_job_description": request.no_job_description,
+        "recipient_name": request.recipient_name,
+        "company_name": request.company_name,
+    }
+    if request.linkedin_post_text:
+        context["linkedin_post_text"] = request.linkedin_post_text
+    if request.job_description_text:
+        context["job_description_text"] = request.job_description_text
+    return json.dumps(context)
 
 
 def validate_generated_email(raw_output: object) -> GeneratedEmail:

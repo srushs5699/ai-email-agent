@@ -45,7 +45,14 @@ async function parseResponse<T>(response: Response): Promise<T> {
     throw new ApiUnauthorizedError()
   }
 
-  throw new ApiRequestError('The backend request failed.', response.status)
+  let message = 'The backend request failed.'
+  try {
+    const body: unknown = await response.json()
+    if (typeof body === 'object' && body !== null && 'detail' in body && typeof body.detail === 'string') message = body.detail
+  } catch {
+    // Non-JSON error responses intentionally retain the safe generic message.
+  }
+  throw new ApiRequestError(message, response.status)
 }
 
 export async function getPublicApi<T>(path: string): Promise<T> {

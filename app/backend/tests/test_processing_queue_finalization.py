@@ -57,3 +57,25 @@ def test_pending_or_processing_items_remain_active(monkeypatch: Any) -> None:
 
     assert result is not None
     assert result["status"] == "running"
+
+
+def test_successful_retry_replaces_stale_failure_in_terminal_summary(
+    monkeypatch: Any,
+) -> None:
+    storage = SupabaseAdmin("https://example.test", "key")
+    current = queue("completed_with_failures", ["completed", "completed"])
+    current.update({"completed_items": 1, "failed_items": 2})
+    monkeypatch.setattr(storage, "_queue", lambda *_: current)
+    calls: list[dict[str, Any]] = []
+
+    def patch(*_args: Any, **kwargs: Any) -> Response:
+        calls.append(kwargs)
+        return Response([{}])
+
+    monkeypatch.setattr(httpx, "patch", patch)
+
+    storage.reconcile_processing_queue("queue-1", "user-1")
+
+    assert calls[0]["json"]["status"] == "completed"
+    assert calls[0]["json"]["completed_items"] == 2
+    assert calls[0]["json"]["failed_items"] == 0

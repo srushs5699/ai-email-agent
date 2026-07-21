@@ -1,14 +1,17 @@
-import { fireEvent, render, screen, within } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { ReviewQueuePage } from './ReviewQueuePage'
 import { normalizeLegacyEmailBody } from '../lib/reviewDraftFormatting'
 
 const mocks = vi.hoisted(() => ({ list: vi.fn(), update: vi.fn(), regenerate: vi.fn(), reject: vi.fn(), remove: vi.fn(), approve: vi.fn(), send: vi.fn() }))
 const gmailMocks = vi.hoisted(() => ({ create: vi.fn(), sync: vi.fn() }))
-vi.mock('../api/drafts', () => ({ listReviewDrafts: mocks.list, updateDraft: mocks.update, regenerateDraft: mocks.regenerate, rejectDraft: mocks.reject, deleteDraft: mocks.remove, approveDraft: mocks.approve, sendDraft: mocks.send }))
+vi.mock('../api/drafts', () => ({ listReviewDrafts: mocks.list, updateDraft: mocks.update, regenerateDraft: mocks.regenerate, rejectDraft: mocks.reject, approveDraft: mocks.approve, sendDraft: mocks.send }))
+vi.mock('../api/outreachItems', () => ({ deleteOutreachItem: mocks.remove }))
 vi.mock('../api/gmail', () => ({ createGmailDraft: gmailMocks.create, syncGmailDraft: gmailMocks.sync }))
 
 beforeEach(() => { vi.clearAllMocks(); mocks.list.mockResolvedValue({ drafts: [] }) })
+
+it('permanently deletes through the outreach endpoint only after confirmation', async () => { const draft = { id: 'd1', outreach_item_id: 'o1', resume_id: 'r1', recipient_to: 'to@example.com', recipient_cc: null, subject: 'Subject', body: 'Body', status: 'ready_for_review', created_at: '', updated_at: '', gmail_draft_id: null, gmail_message_id: null, gmail_sync_status: 'not_created', gmail_sync_error_code: null, approval_status: 'pending', approved_at: null, send_status: 'not_sent', sent_at: null, gmail_sent_message_id: null, send_error_code: null }; mocks.list.mockResolvedValue({ drafts: [draft] }); mocks.remove.mockResolvedValue({ deleted: true, outreach_item_id: 'o1' }); vi.stubGlobal('confirm', vi.fn(() => true)); render(<ReviewQueuePage />); fireEvent.click(await screen.findByRole('button', { name: 'Delete' })); await waitFor(() => expect(mocks.remove).toHaveBeenCalledWith('o1')); expect(await screen.findByText('Task permanently deleted. This LinkedIn post can be imported again.')).toBeInTheDocument() })
 describe('ReviewQueuePage', () => {
   it('normalizes escaped legacy line breaks once without changing real breaks', () => { const normalized = normalizeLegacyEmailBody('Hello,\\n\\nBody'); expect(normalized).toBe('Hello,\n\nBody'); expect(normalizeLegacyEmailBody(normalized)).toBe(normalized) })
   it('shows an accessible empty state', async () => { render(<ReviewQueuePage />); expect(await screen.findByText('No drafts waiting for review')).toBeInTheDocument() })

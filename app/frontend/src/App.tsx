@@ -13,6 +13,7 @@ import { ResumeLibraryPage } from './pages/ResumeLibraryPage'
 import { ProcessingQueuePage } from './pages/ProcessingQueuePage'
 import { ReviewQueuePage } from './pages/ReviewQueuePage'
 import { FailedTasksQueuePage } from './pages/FailedTasksQueuePage'
+import { ExtensionImportPage } from './pages/ExtensionImportPage'
 
 function AuthenticationLoading() {
   return <main className="login-page" aria-live="polite"><p>Checking authentication...</p></main>
@@ -119,6 +120,7 @@ function App() {
             }
           />
           <Route path="/processing-queue" element={<ProtectedRoute><ProcessingQueuePage /></ProtectedRoute>} />
+          <Route path="/extension-import" element={<ProtectedRoute><ExtensionImportPage /></ProtectedRoute>} />
           <Route path="/review-queue" element={<ProtectedRoute><ReviewQueuePage /></ProtectedRoute>} />
           <Route path="/failed-tasks" element={<ProtectedRoute><FailedTasksQueuePage /></ProtectedRoute>} />
           <Route path="*" element={<Navigate to="/" replace />} />

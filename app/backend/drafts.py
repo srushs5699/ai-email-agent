@@ -34,9 +34,9 @@ Storage = Annotated[SupabaseAdmin, Depends(get_supabase_admin)]
 
 class DraftCreateRequest(BaseModel):
     resume_id: UUID
-    linkedin_post_url: str | None = None
-    linkedin_post_text: str = ""
-    job_description_text: str = ""
+    linkedin_post_url: str
+    linkedin_post_text: str | None = None
+    job_description_text: str | None = None
     no_job_description: bool = False
     recipient_to: str
     recipient_cc: str | None = None
@@ -411,6 +411,9 @@ def regenerate_draft(
             raise HTTPException(
                 422, "The selected resume is not ready for email generation."
             )
+        source_url = outreach.get("linkedin_post_url")
+        if not isinstance(source_url, str) or not source_url.strip():
+            raise HTTPException(422, "LinkedIn Post URL / JD URL is required.")
         resume = storage.get_resume(resume_id, user["user_id"])
         if (
             resume is None
@@ -422,6 +425,7 @@ def regenerate_draft(
             )
         request = EmailGenerationRequest(
             resume_id=UUID(resume_id),
+            linkedin_post_url=source_url,
             linkedin_post_text=outreach.get("linkedin_post_text") or "",
             job_description_text=outreach.get("job_description_text") or "",
             no_job_description=outreach.get("no_job_description", False),

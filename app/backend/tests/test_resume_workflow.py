@@ -170,6 +170,7 @@ def test_resume_delete_does_not_allow_another_users_record(
 def generation_payload(resume_id: str) -> dict[str, object]:
     return {
         "resume_id": resume_id,
+        "linkedin_post_url": "https://jobs.example.com/role",
         "linkedin_post_text": "We are growing our engineering team.",
         "job_description_text": "Build reliable web applications.",
         "no_job_description": False,
@@ -217,7 +218,7 @@ def test_rejects_generation_for_another_users_resume(
     assert response.status_code == 404
 
 
-def test_rejects_missing_generation_input(
+def test_generates_with_only_source_url_and_resume(
     client: TestClient, fake_storage: FakeStorage
 ) -> None:
     resume_id = "00000000-0000-0000-0000-000000000012"
@@ -233,7 +234,7 @@ def test_rejects_missing_generation_input(
 
     response = client.post("/api/v1/email-generation", json=payload)
 
-    assert response.status_code == 422
+    assert response.status_code == 200
 
 
 def test_rejects_blank_generation_recipient(

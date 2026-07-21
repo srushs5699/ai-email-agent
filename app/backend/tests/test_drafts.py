@@ -77,6 +77,7 @@ def client(storage: FakeDraftStorage) -> Generator[TestClient]:
 def payload(**changes: object) -> dict[str, object]:
     return {
         "resume_id": "00000000-0000-0000-0000-000000000001",
+        "linkedin_post_url": "https://jobs.example.com/role",
         "linkedin_post_text": "Post",
         "job_description_text": "Role",
         "no_job_description": False,

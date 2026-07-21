@@ -74,12 +74,7 @@ afterEach(() => {
 })
 
 function fillValidForm(): void {
-  fireEvent.change(screen.getByLabelText('LinkedIn post text'), {
-    target: { value: 'We are expanding our platform team.' },
-  })
-  fireEvent.change(screen.getByLabelText('Job description text'), {
-    target: { value: 'Build robust backend services.' },
-  })
+  fireEvent.change(screen.getByLabelText('LinkedIn Post URL / JD URL *'), { target: { value: 'https://jobs.example.com/role' } })
   fireEvent.change(screen.getByLabelText('To'), {
     target: { value: 'recipient@example.com' },
   })
@@ -93,9 +88,28 @@ describe('OutreachPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Generate Email' }))
 
     expect(await screen.findByRole('alert')).toHaveTextContent(
-      'Add LinkedIn post text or a job description.',
+      'Recipient email is required.',
     )
     expect(apiMocks.generateEmail).not.toHaveBeenCalled()
+  })
+
+  it('imports extension details into editable manual fields without creating a record', async () => {
+    render(<OutreachPage />)
+    await screen.findByRole('option', { name: 'My Resume' })
+    window.dispatchEvent(new MessageEvent('message', { origin: window.location.origin, source: window, data: { type: 'AI_EMAIL_AGENT_LINKEDIN_IMPORT', payload: { version: 1, sourceUrl: 'https://www.linkedin.com/feed/update/urn:li:activity:1', authorName: 'Ada Lovelace', authorProfileUrl: 'https://www.linkedin.com/in/ada', postText: 'We are hiring.', jobDescriptionUrl: 'https://careers.example.com/job/1', warnings: [], capturedAt: '2026-07-19T00:00:00Z' } } }))
+    expect(await screen.findByText(/LinkedIn details were imported/)).toBeInTheDocument()
+    expect(screen.getByLabelText('LinkedIn Post Text (Optional)')).toHaveValue('We are hiring.')
+    expect(screen.getByLabelText('Recipient name (optional)')).toHaveValue('Ada Lovelace')
+    expect(screen.getByLabelText('Job description text')).toHaveValue('')
+    expect(apiMocks.createDraft).not.toHaveBeenCalled()
+    expect(apiMocks.generateEmail).not.toHaveBeenCalled()
+  })
+
+  it('shows a safe failure message for malformed extension data', async () => {
+    render(<OutreachPage />)
+    await screen.findByRole('option', { name: 'My Resume' })
+    window.dispatchEvent(new MessageEvent('message', { origin: window.location.origin, source: window, data: { type: 'AI_EMAIL_AGENT_LINKEDIN_IMPORT', payload: { version: 1, sourceUrl: 'bad' } } }))
+    expect(await screen.findByText(/could not be read safely/)).toBeInTheDocument()
   })
 
   it('generates and displays editable email content', async () => {

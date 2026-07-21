@@ -15,6 +15,7 @@ export interface DraftInput {
 
 export interface Draft extends Omit<DraftInput, 'resume_id'> {
   id: string
+  outreach_item_id: string
   resume_id: string | null
   status: 'draft' | 'ready_for_review' | 'sent' | 'rejected' | 'deleted'
   created_at: string

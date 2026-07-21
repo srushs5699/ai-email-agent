@@ -4,12 +4,13 @@
 import asyncio
 import logging
 from datetime import datetime, timezone
-from typing import Annotated, Any
+from typing import Annotated, Any, Mapping
 from uuid import UUID
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
+from urllib.parse import urlsplit
 
 from auth import AuthenticatedUser, get_current_user
 from drafts import DraftCreateRequest
@@ -37,6 +38,42 @@ class QueueInput(EmailGenerationRequest):
     pass
 
 
+def normalize_queue_input_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Return one canonical job-description state for queue validation."""
+    normalized = dict(payload)
+    for field in (
+        "linkedin_post_url",
+        "linkedin_post_text",
+        "job_description_url",
+        "job_description_text",
+        "job_description_source",
+    ):
+        value = normalized.get(field)
+        if isinstance(value, str):
+            normalized[field] = value.strip() or None
+
+    text = normalized.get("job_description_text")
+    url = normalized.get("job_description_url")
+    source = normalized.get("job_description_source")
+    source = source.lower() if isinstance(source, str) else None
+
+    if text:
+        normalized["no_job_description"] = False
+        normalized["job_description_source"] = (
+            source if source in {"visible_page", "manual"} else "manual"
+        )
+    elif source == "unavailable" or not url:
+        normalized["job_description_text"] = ""
+        normalized["job_description_url"] = None
+        normalized["job_description_source"] = "unavailable"
+        normalized["no_job_description"] = True
+    else:
+        normalized["job_description_text"] = ""
+        normalized["job_description_source"] = "visible_page"
+        normalized["no_job_description"] = False
+    return normalized
+
+
 class QueueCreateRequest(BaseModel):
     items: list[QueueInput] = Field(min_length=1, max_length=10)
 
@@ -47,8 +84,12 @@ class QueueItemResponse(BaseModel):
     status: str
     generated_draft_id: UUID | None = None
     error_code: str | None = None
+    failure_status: str | None = None
+    failure_reason: str | None = None
     created_at: str
     updated_at: str
+    started_at: str | None = None
+    completed_at: str | None = None
     outreach_item_id: UUID | None = None
     source_linkedin_post_url: str | None = None
     source_author_name: str | None = None
@@ -68,15 +109,39 @@ class QueueItemUpdateRequest(BaseModel):
     recipient_to: str | None = Field(default=None, max_length=320)
     recipient_cc: str | None = Field(default=None, max_length=320)
 
+    @field_validator("linkedin_post_url")
+    @classmethod
+    def source_url_is_safe(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("LinkedIn Post URL / JD URL is required.")
+        parsed = urlsplit(normalized)
+        if parsed.scheme not in {"http", "https"}:
+            raise ValueError("Only HTTP and HTTPS URLs are allowed.")
+        if not parsed.netloc:
+            raise ValueError("Enter a valid HTTP or HTTPS LinkedIn post, job, or JD URL.")
+        return normalized
+
+    @field_validator("linkedin_post_text", "job_description_text", "author_name")
+    @classmethod
+    def optional_text_is_nullable(cls, value: str | None) -> str | None:
+        return value.strip() or None if value is not None else None
+
 
 class QueueResponse(BaseModel):
     id: UUID
+    queue_number: int = 0
     status: str
     total_items: int
     completed_items: int
     failed_items: int
     created_at: str
     updated_at: str
+    started_at: str | None = None
+    paused_at: str | None = None
+    completed_at: str | None = None
     items: list[QueueItemResponse]
 
 
@@ -90,16 +155,10 @@ def _not_found() -> HTTPException:
     return HTTPException(404, "Processing queue not found.")
 
 
-def _safe_error(error: Exception) -> str:
-    # Never persist provider/upstream text; this small taxonomy is safe for UI/logs.
-    return (
-        "generation_unavailable"
-        if isinstance(error, ProviderUnavailableError)
-        else "generation_failed"
-    )
-
-
-def _failure_details(error: Exception) -> tuple[str, str, str]:
+def _failure_details(
+    error: Exception, stage: str = "processing"
+) -> tuple[str, str, str]:
+    """Return a user-safe status, code, and reason without provider internals."""
     if isinstance(error, DuplicateQueueItemError):
         return (
             "duplicate",
@@ -116,7 +175,7 @@ def _failure_details(error: Exception) -> tuple[str, str, str]:
         return (
             "failed",
             "generation_unavailable",
-            "Email generation is temporarily unavailable. Try again.",
+            "The AI provider was unavailable during email generation.",
         )
     if isinstance(error, ValueError) and str(error) == "resume":
         return (
@@ -124,23 +183,61 @@ def _failure_details(error: Exception) -> tuple[str, str, str]:
             "resume_unavailable",
             "The selected resume is unavailable or not ready.",
         )
+    if isinstance(error, httpx.TimeoutException):
+        return (
+            "failed",
+            "external_service_timeout",
+            f"The external service timed out during {stage.replace('_', ' ')}.",
+        )
+    if isinstance(error, httpx.HTTPStatusError) and error.response is not None:
+        return (
+            "failed",
+            "external_service_http_error",
+            f"The external service returned HTTP {error.response.status_code} during "
+            f"{stage.replace('_', ' ')}.",
+        )
+    if isinstance(error, ValidationError):
+        return (
+            "failed",
+            "invalid_processing_input",
+            "The saved processing details are incomplete or invalid.",
+        )
     return (
         "failed",
-        _safe_error(error),
-        "This task could not be processed. Try again.",
+        "processing_error",
+        f"{stage.replace('_', ' ').capitalize()} failed. Please review the task and retry.",
     )
+
+
+def _safe_exception_message(error: Exception) -> str:
+    if isinstance(error, httpx.HTTPStatusError) and error.response is not None:
+        return f"HTTP {error.response.status_code}"
+    if isinstance(error, httpx.TimeoutException):
+        return "request timed out"
+    if isinstance(error, ProviderUnavailableError):
+        return "AI provider unavailable"
+    if isinstance(error, ValidationError):
+        return "processing input validation failed"
+    if isinstance(error, ValueError) and str(error) == "resume":
+        return "selected resume unavailable"
+    return "unexpected processing error"
 
 
 @router.post("", response_model=QueueResponse, status_code=status.HTTP_201_CREATED)
 def create_queue(
     request: QueueCreateRequest, user: CurrentUser, storage: Storage
 ) -> QueueResponse:
-    for item in request.items:
+    normalized_items = [
+        QueueInput.model_validate(normalize_queue_input_payload(item.model_dump()))
+        for item in request.items
+    ]
+    for item in normalized_items:
         if storage.get_resume(str(item.resume_id), user["user_id"]) is None:
             raise HTTPException(404, "Resume not found.")
     try:
         record = storage.create_processing_queue(
-            user["user_id"], [item.model_dump(mode="json") for item in request.items]
+            user["user_id"],
+            [item.model_dump(mode="json") for item in normalized_items],
         )
         return _queue_response(record)
     except httpx.HTTPError as error:
@@ -155,12 +252,36 @@ def active_queue(user: CurrentUser, storage: Storage) -> QueueResponse:
     return _queue_response(record)
 
 
+@router.get("", response_model=list[QueueResponse])
+def list_queues(user: CurrentUser, storage: Storage) -> list[QueueResponse]:
+    records = storage.list_processing_queues(user["user_id"])
+    active = {"draft", "running", "paused"}
+    records.sort(key=lambda record: record.get("status") not in active)
+    return [_queue_response(record) for record in records]
+
+
 @router.get("/{queue_id}", response_model=QueueResponse)
 def get_queue(queue_id: UUID, user: CurrentUser, storage: Storage) -> QueueResponse:
     record = storage.get_processing_queue(str(queue_id), user["user_id"])
     if record is None:
         raise _not_found()
     return _queue_response(record)
+
+
+@router.delete("/{queue_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_queue(queue_id: UUID, user: CurrentUser, storage: Storage) -> None:
+    try:
+        deleted = storage.delete_processing_queue(str(queue_id), user["user_id"])
+    except httpx.HTTPError as error:
+        logger.exception("queue_delete_failed queue_id=%s", queue_id)
+        raise HTTPException(502, "The queue could not be deleted.") from error
+    if deleted is None:
+        raise _not_found()
+    if not deleted:
+        raise HTTPException(
+            409,
+            "Active queues cannot be deleted. Pause or wait for processing to finish.",
+        )
 
 
 @router.delete("/{queue_id}/items/{item_id}", status_code=204)
@@ -295,8 +416,23 @@ def process_queue_item(
     generator: EmailGenerator,
 ) -> None:
     """Process a claimed queue item; shared by normal processing and one-task retry."""
+    stage = "retry_validation"
+    item_id = item.get("id")
+    outreach_item_id = item.get("outreach_item_id")
+    logger.info(
+        "processing_stage_started item_id=%s outreach_item_id=%s stage=%s",
+        item_id,
+        outreach_item_id,
+        stage,
+    )
     try:
-        payload = QueueInput.model_validate(item["input_payload"])
+        payload = QueueInput.model_validate(
+            normalize_queue_input_payload(item["input_payload"])
+        )
+        logger.info("processing_stage_completed item_id=%s stage=%s", item_id, stage)
+
+        stage = "resume_loading"
+        logger.info("processing_stage_started item_id=%s stage=%s", item_id, stage)
         resume = storage.get_resume(str(payload.resume_id), user_id)
         if (
             resume is None
@@ -304,13 +440,25 @@ def process_queue_item(
             or not isinstance(resume.get("extracted_text"), str)
         ):
             raise ValueError("resume")
+        logger.info("processing_stage_completed item_id=%s stage=%s", item_id, stage)
+
+        stage = "recipient_resolution"
+        logger.info("processing_stage_started item_id=%s stage=%s", item_id, stage)
         if storage.find_active_duplicate_draft(
             user_id, payload.recipient_to, payload.linkedin_post_url
         ):
             raise DuplicateQueueItemError()
+        logger.info("processing_stage_completed item_id=%s stage=%s", item_id, stage)
+
+        stage = "ai_generation"
+        logger.info("processing_stage_started item_id=%s stage=%s", item_id, stage)
         generated = generator.generate(
             build_generation_prompt(resume["extracted_text"], payload)
         )
+        logger.info("processing_stage_completed item_id=%s stage=%s", item_id, stage)
+
+        stage = "database_update"
+        logger.info("processing_stage_started item_id=%s stage=%s", item_id, stage)
         draft_request = DraftCreateRequest(
             **payload.model_dump(), subject=generated.subject, body=generated.body
         )
@@ -336,13 +484,31 @@ def process_queue_item(
         }
         saved = storage.create_draft(outreach, draft)
         storage.complete_processing_queue_item(item["id"], user_id, saved["id"])
+        try:
+            if storage.cleanup_completed_processing_queue(item["queue_id"], user_id):
+                logger.info(
+                    "completed_processing_queue_cleaned queue_id=%s", item["queue_id"]
+                )
+        except Exception as cleanup_error:
+            logger.exception(
+                "completed_queue_cleanup_failed queue_id=%s user_id=%s exception_type=%s",
+                item["queue_id"],
+                user_id,
+                type(cleanup_error).__name__,
+            )
+        logger.info("processing_stage_completed item_id=%s stage=%s", item_id, stage)
     except Exception as error:
-        failure_status, error_code, reason = _failure_details(error)
-        logger.warning(
-            "processing queue item failed item_id=%s code=%s",
-            item.get("id"),
+        failure_status, error_code, reason = _failure_details(error, stage)
+        logger.exception(
+            "processing_stage_failed item_id=%s outreach_item_id=%s stage=%s "
+            "exception_type=%s exception_message=%s code=%s",
+            item_id,
+            outreach_item_id,
+            stage,
+            type(error).__name__,
+            _safe_exception_message(error),
             error_code,
         )
         storage.fail_processing_queue_item(
-            item["id"], user_id, error_code, failure_status, reason
+            item["id"], user_id, error_code, failure_status, reason, stage
         )

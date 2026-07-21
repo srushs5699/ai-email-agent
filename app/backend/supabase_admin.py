@@ -1,4 +1,5 @@
 # ruff: noqa: E501, E701, E702
+import logging
 import os
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -12,6 +13,8 @@ from gmail_connections import (
     GmailConnectionUpsert,
     OAuthStateRecord,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class GmailPersistenceError(Exception):
@@ -182,10 +185,18 @@ class SupabaseAdmin:
     ) -> dict[str, Any] | None:
         if not linkedin_post_url:
             return None
+        endpoint = f"{self._project_url}/rest/v1/generated_drafts"
+        logger.info(
+            "recipient_resolution_started provider=supabase_postgrest method=GET url=%s",
+            endpoint,
+        )
         response = httpx.get(
-            f"{self._project_url}/rest/v1/generated_drafts",
+            endpoint,
             params={
-                "select": "id,outreach_items!inner(recipient_to,linkedin_post_url)",
+                "select": (
+                    "id,outreach_items!generated_drafts_outreach_item_same_owner_fkey!inner("
+                    "recipient_to,linkedin_post_url)"
+                ),
                 "user_id": f"eq.{user_id}",
                 "draft_status": "in.(draft,ready_for_review,sent)",
                 "outreach_items.recipient_to": f"eq.{recipient_to}",
@@ -194,6 +205,15 @@ class SupabaseAdmin:
             },
             headers=self._headers,
             timeout=30.0,
+        )
+        logger.info(
+            "recipient_resolution_response provider=supabase_postgrest status_code=%s "
+            "location=%s content_type=%s redirect_history=%s response_preview=%s",
+            response.status_code,
+            response.headers.get("location"),
+            response.headers.get("content-type"),
+            len(response.history),
+            response.text[:500] if not 200 <= response.status_code < 300 else "",
         )
         response.raise_for_status()
         rows = response.json()
@@ -652,6 +672,31 @@ class SupabaseAdmin:
     ) -> dict[str, Any] | None:
         return self._queue(queue_id, user_id)
 
+    def list_processing_queues(self, user_id: str) -> list[dict[str, Any]]:
+        """Return every user-owned queue so active work and history stay visible."""
+        response = httpx.get(
+            f"{self._project_url}/rest/v1/processing_queues",
+            params={
+                "select": "*,processing_queue_items(*)",
+                "user_id": f"eq.{user_id}",
+                "order": "updated_at.desc",
+                "processing_queue_items.order": "position.asc",
+            },
+            headers=self._headers,
+            timeout=30.0,
+        )
+        response.raise_for_status()
+        rows = response.json()
+        records = (
+            [row for row in rows if isinstance(row, dict)]
+            if isinstance(rows, list)
+            else []
+        )
+        return [
+            self.finalize_processing_queue_if_done(str(record["id"]), user_id) or record
+            for record in records
+        ]
+
     def get_active_processing_queue(self, user_id: str) -> dict[str, Any] | None:
         response = httpx.get(
             f"{self._project_url}/rest/v1/processing_queues",
@@ -748,6 +793,22 @@ class SupabaseAdmin:
             if isinstance(rows, list) and rows and isinstance(rows[0], dict)
             else None
         )
+
+    def delete_processing_queue(self, queue_id: str, user_id: str) -> bool | None:
+        """Delete an inactive queue and its queue items, preserving outreach/drafts."""
+        queue = self._queue(queue_id, user_id)
+        if queue is None:
+            return None
+        if queue.get("status") in {"draft", "running", "paused"}:
+            return False
+        response = httpx.delete(
+            f"{self._project_url}/rest/v1/processing_queues",
+            params={"id": f"eq.{queue_id}", "user_id": f"eq.{user_id}"},
+            headers={**self._headers, "Prefer": "return=representation"},
+            timeout=30.0,
+        )
+        response.raise_for_status()
+        return bool(response.json())
 
     def update_processing_queue_item(
         self, queue_id: str, item_id: str, user_id: str, update: dict[str, object]
@@ -887,6 +948,9 @@ class SupabaseAdmin:
             json={
                 "status": "completed",
                 "generated_draft_id": draft_id,
+                "error_code": None,
+                "failure_status": None,
+                "failure_reason": None,
                 "completed_at": datetime.now(timezone.utc).isoformat(),
                 "processing_lease_expires_at": None,
             },
@@ -895,6 +959,16 @@ class SupabaseAdmin:
         )
         response.raise_for_status()
 
+    def cleanup_completed_processing_queue(self, queue_id: str, user_id: str) -> bool:
+        response = httpx.post(
+            f"{self._project_url}/rest/v1/rpc/cleanup_completed_processing_queue",
+            json={"p_queue_id": queue_id, "p_user_id": user_id},
+            headers=self._headers,
+            timeout=30.0,
+        )
+        response.raise_for_status()
+        return response.json() is True
+
     def fail_processing_queue_item(
         self,
         item_id: str,
@@ -902,6 +976,7 @@ class SupabaseAdmin:
         error_code: str,
         failure_status: str = "failed",
         failure_reason: str | None = None,
+        failure_stage: str | None = None,
     ) -> None:
         httpx.patch(
             f"{self._project_url}/rest/v1/processing_queue_items",
@@ -915,6 +990,7 @@ class SupabaseAdmin:
                 "error_code": error_code,
                 "failure_status": failure_status,
                 "failure_reason": failure_reason or "This task could not be processed.",
+                "failure_stage": failure_stage,
                 "completed_at": datetime.now(timezone.utc).isoformat(),
                 "processing_lease_expires_at": None,
             },
@@ -931,7 +1007,7 @@ class SupabaseAdmin:
             params={
                 "select": "*",
                 "user_id": f"eq.{user_id}",
-                "or": "(status.eq.failed,failure_status.not.is.null)",
+                "status": "eq.failed",
                 "hidden_at": "is.null",
                 "order": "updated_at.desc",
             },
@@ -983,6 +1059,37 @@ class SupabaseAdmin:
             else None
         )
 
+    def update_failed_processing_queue_item(
+        self, item_id: str, user_id: str, payload: dict[str, object]
+    ) -> dict[str, Any] | None:
+        """Persist corrected retry input without changing the failed lifecycle state."""
+        response = httpx.patch(
+            f"{self._project_url}/rest/v1/processing_queue_items",
+            params={
+                "id": f"eq.{item_id}",
+                "user_id": f"eq.{user_id}",
+                "status": "eq.failed",
+            },
+            json={
+                "input_payload": payload,
+                "source_linkedin_post_url": payload.get("linkedin_post_url"),
+                "source_linkedin_post_text": payload.get("linkedin_post_text"),
+                "source_job_description_url": payload.get("job_description_url"),
+                "source_job_description_text": payload.get("job_description_text"),
+                "source_author_name": payload.get("author_name"),
+                "source_author_profile_url": payload.get("author_profile_url"),
+            },
+            headers={**self._headers, "Prefer": "return=representation"},
+            timeout=30.0,
+        )
+        response.raise_for_status()
+        rows = response.json()
+        return (
+            rows[0]
+            if isinstance(rows, list) and rows and isinstance(rows[0], dict)
+            else None
+        )
+
     def hide_failed_task(self, item_id: str, user_id: str) -> bool:
         response = httpx.patch(
             f"{self._project_url}/rest/v1/processing_queue_items",
@@ -1011,19 +1118,31 @@ class SupabaseAdmin:
             item.get("status") in {"pending", "processing"} for item in items
         ):
             return queue
-        if queue.get("status") not in {"draft", "running", "paused"}:
+        completed = sum(
+            item.get("status") == "completed"
+            or item.get("failure_status") in {"duplicate", "no_email_available"}
+            for item in items
+        )
+        failed = sum(
+            item.get("status") == "failed"
+            and item.get("failure_status") not in {"duplicate", "no_email_available"}
+            for item in items
+        )
+        status_value = "completed_with_failures" if failed else "completed"
+        if (
+            queue.get("status") == status_value
+            and queue.get("completed_items") == completed
+            and queue.get("failed_items") == failed
+        ):
             return queue
-        failed = sum(item.get("status") == "failed" for item in items)
-        completed = sum(item.get("status") == "completed" for item in items)
         response = httpx.patch(
             f"{self._project_url}/rest/v1/processing_queues",
             params={
                 "id": f"eq.{queue_id}",
                 "user_id": f"eq.{user_id}",
-                "status": "in.(draft,running,paused)",
             },
             json={
-                "status": "completed_with_failures" if failed else "completed",
+                "status": status_value,
                 "completed_items": completed,
                 "failed_items": failed,
                 "completed_at": datetime.now(timezone.utc).isoformat(),

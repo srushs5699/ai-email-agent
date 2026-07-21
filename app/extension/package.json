@@ -1,0 +1,13 @@
+{
+  "name": "ai-email-agent-linkedin-extension",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build": "../frontend/node_modules/.bin/tsc -p tsconfig.json --noEmit && node scripts/build.mjs && node scripts/verify-build.mjs",
+    "verify:build": "node scripts/verify-build.mjs",
+    "typecheck": "../frontend/node_modules/.bin/tsc -p tsconfig.json --noEmit",
+    "lint": "../frontend/node_modules/.bin/eslint src tests",
+    "test": "NODE_PATH=../frontend/node_modules ../frontend/node_modules/.bin/vitest run --root . --environment jsdom tests"
+  }
+}
