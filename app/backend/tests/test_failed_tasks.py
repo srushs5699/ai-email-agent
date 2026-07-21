@@ -1,4 +1,5 @@
-from typing import Any, Generator
+from collections.abc import Generator
+from typing import Any
 
 import httpx
 import pytest
@@ -130,7 +131,7 @@ class FailedTaskGenerator:
 
 
 @pytest.fixture
-def failed_task_client() -> Generator[tuple[TestClient, FailedTaskStorage]]:
+def failed_task_client() -> Generator[tuple[TestClient, FailedTaskStorage], None, None]:
     storage = FailedTaskStorage()
     app.dependency_overrides[get_current_user] = lambda: {
         "user_id": "user-123",

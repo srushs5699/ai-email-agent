@@ -139,6 +139,7 @@ class EmailGenerationRequest(BaseModel):
             raise ValueError("Enter a valid email address.")
         return normalized_value
 
+
 class GeneratedEmail(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 

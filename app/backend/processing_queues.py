@@ -121,7 +121,9 @@ class QueueItemUpdateRequest(BaseModel):
         if parsed.scheme not in {"http", "https"}:
             raise ValueError("Only HTTP and HTTPS URLs are allowed.")
         if not parsed.netloc:
-            raise ValueError("Enter a valid HTTP or HTTPS LinkedIn post, job, or JD URL.")
+            raise ValueError(
+                "Enter a valid HTTP or HTTPS LinkedIn post, job, or JD URL."
+            )
         return normalized
 
     @field_validator("linkedin_post_text", "job_description_text", "author_name")

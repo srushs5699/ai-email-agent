@@ -99,7 +99,9 @@ def test_queue_accepts_http_source_urls_from_any_host(url: str) -> None:
     assert validated.linkedin_post_url == url
 
 
-@pytest.mark.parametrize("url", ["javascript:alert(1)", "data:text/plain,nope", "file:///tmp/a"])
+@pytest.mark.parametrize(
+    "url", ["javascript:alert(1)", "data:text/plain,nope", "file:///tmp/a"]
+)
 def test_queue_rejects_unsafe_source_url_protocols(url: str) -> None:
     with pytest.raises(ValidationError, match="Only HTTP and HTTPS URLs are allowed"):
         QueueInput.model_validate({**item(), "linkedin_post_url": url})
